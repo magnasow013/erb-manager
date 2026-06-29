@@ -15,6 +15,85 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+def _extract_pdf_tables(uploaded_file):
+    """
+    Extrait les données d'un PDF bancaire.
+    Stratégies (dans l'ordre) :
+      1. pdfplumber tables structurées
+      2. pdfplumber texte brut → parsing intelligent
+      3. Détection scan → message explicite
+    """
+    try:
+        import pdfplumber, io, re as _re
+        uploaded_file.seek(0)
+        raw_bytes = uploaded_file.read()
+        all_rows = []
+        n_pages = 0
+        has_text = False
+
+        with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
+            n_pages = len(pdf.pages)
+            for page_num, page in enumerate(pdf.pages):
+
+                # ── Stratégie 1 : tableaux structurés ────────────────
+                tables = page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                })
+                if not tables:
+                    tables = page.extract_tables({
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "text",
+                        "snap_tolerance": 5,
+                    })
+                for table in tables:
+                    for row in table:
+                        if row and any(c for c in row if c and str(c).strip()):
+                            all_rows.append([str(c or '').strip().replace('\n',' ') for c in row])
+
+                # ── Stratégie 2 : texte brut si pas de tableaux ───────
+                if not tables:
+                    text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                    if text and text.strip():
+                        has_text = True
+                        for line in text.split('\n'):
+                            line = line.strip()
+                            if not line: continue
+                            # Détecter lignes avec dates (format africain DD/MM/YYYY ou DD-MM-YYYY)
+                            # Séparer sur multiples espaces pour préserver les champs
+                            parts = _re.split(r'  +', line)
+                            if len(parts) >= 2:
+                                all_rows.append([p.strip() for p in parts])
+                            else:
+                                # Tentative de split sur tabulation
+                                parts2 = line.split('\t')
+                                if len(parts2) >= 2:
+                                    all_rows.append([p.strip() for p in parts2])
+                                else:
+                                    all_rows.append([line])
+
+        if not all_rows:
+            if not has_text:
+                return None, (
+                    f"PDF scanné détecté ({n_pages} page(s)) — ce type de PDF contient des images "
+                    "et non du texte. Solutions : \n"
+                    "• Demandez le relevé en format numérique (export PDF depuis le portail bancaire)\n"
+                    "• Ou convertissez manuellement en Excel avant import"
+                )
+            return None, f"Aucune donnée extractible trouvée dans le PDF ({n_pages} page(s))"
+
+        # Normaliser les longueurs
+        max_cols = max(len(r) for r in all_rows)
+        all_rows = [r + [''] * (max_cols - len(r)) for r in all_rows]
+        df = pd.DataFrame(all_rows)
+        return df, None
+
+    except ImportError:
+        return None, "pdfplumber non installé. Ajoutez 'pdfplumber' dans requirements.txt"
+    except Exception as ex:
+        return None, f"Erreur lecture PDF : {str(ex)[:300]}"
+
+
 # ── Configuration Supabase ────────────────────────────────────────────
 # 1. Créez un projet sur supabase.com (gratuit)
 # 2. Allez dans Settings → API → copiez l'URL et la clé anon
@@ -23,7 +102,6 @@ from openpyxl.utils import get_column_letter
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = "https://ngljmbidrzpeyhtvsbfe.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5nbGptYmlkcnpwZXlodHZzYmZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMTgwODIsImV4cCI6MjA5NzY5NDA4Mn0.Mwwvr2FDV7V1gTRZmRhHpkgWxNZyPAl6Go5c76Aoe9A"
-SENDGRID_API_KEY = "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"
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -262,13 +340,13 @@ LICENCES = {
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
-        "entreprise": "Alliance",
-        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "entreprise": "Client 4",
+        "domaines":   ["@gmail.com"],
         "actif": True,
     },
     "ERB-B987-B122-E9BE": {
         "entreprise": "Client 5",
-        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "domaines":   ["@gmail.com"],
         "actif": True,
     },
 }
@@ -701,6 +779,106 @@ def detect_header_row(df_raw):
             return i
     return 0
 
+def _extract_pdf_scanned_via_claude(uploaded_file):
+    """
+    Utilise l'API Claude pour lire un relevé bancaire scanné (PDF image).
+    Retourne un DataFrame avec les colonnes détectées.
+    """
+    try:
+        import base64, json, io, urllib.request, ssl
+        uploaded_file.seek(0)
+        raw_bytes = uploaded_file.read()
+
+        # Récupérer la clé API Anthropic
+        api_key = ""
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            pass
+
+        if not api_key:
+            return None, "Clé ANTHROPIC_API_KEY non configurée dans secrets.toml"
+
+        # Convertir PDF en base64
+        pdf_b64 = base64.standard_b64encode(raw_bytes).decode("utf-8")
+
+        prompt = """Ce PDF est un relevé bancaire. Extrais TOUTES les lignes du tableau de transactions.
+Pour chaque ligne, retourne un objet JSON avec ces clés (si disponibles) :
+- date : date de l'opération (format DD/MM/YYYY)
+- libelle : description/libellé de l'opération  
+- piece : numéro de pièce/référence
+- debit : montant débit (nombre positif, 0 si absent)
+- credit : montant crédit (nombre positif, 0 si absent)
+
+Ignore les lignes de solde, totaux, en-têtes.
+Retourne UNIQUEMENT un tableau JSON valide, rien d'autre. Exemple :
+[{"date":"01/01/2026","libelle":"VIREMENT SALAIRE","piece":"VIR001","debit":0,"credit":500000},
+ {"date":"02/01/2026","libelle":"CHEQUE 00123","piece":"00123","debit":150000,"credit":0}]"""
+
+        payload = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 4000,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": pdf_b64
+                        }
+                    },
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        }).encode("utf-8")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+                "anthropic-beta": "pdfs-2024-09-25"
+            },
+            method="POST"
+        )
+
+        with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+
+        text_response = result["content"][0]["text"].strip()
+        # Nettoyer si besoin
+        if text_response.startswith("```"):
+            text_response = text_response.split("```")[1]
+            if text_response.startswith("json"):
+                text_response = text_response[4:]
+        text_response = text_response.strip()
+
+        rows = json.loads(text_response)
+        if not rows:
+            return None, "Aucune transaction détectée dans le relevé"
+
+        df = pd.DataFrame(rows)
+        # S'assurer que les colonnes requises existent
+        for col in ["date","libelle","piece","debit","credit"]:
+            if col not in df.columns:
+                df[col] = "" if col in ["date","libelle","piece"] else 0.0
+        df["debit"]  = pd.to_numeric(df["debit"],  errors="coerce").fillna(0.0)
+        df["credit"] = pd.to_numeric(df["credit"], errors="coerce").fillna(0.0)
+
+        return df, None
+
+    except Exception as ex:
+        return None, f"Erreur OCR Claude : {str(ex)[:300]}"
+
+
 def load_file(uploaded_file):
     name = uploaded_file.name.lower(); uploaded_file.seek(0)
     if name.endswith('.csv'):
@@ -709,6 +887,9 @@ def load_file(uploaded_file):
                 uploaded_file.seek(0)
                 return pd.read_csv(uploaded_file, encoding=enc, header=None, dtype=str)
             except: pass
+    elif name.endswith('.pdf'):
+        df, err = _extract_pdf_tables(uploaded_file)
+        return df  # None si erreur (gérée dans page_import)
     else:
         return pd.read_excel(uploaded_file, header=None, dtype=str)
     return None
@@ -1025,15 +1206,18 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     sr_rb    = tot_c_rb - tot_d_rb
 
     # COTE JOURNAL
+    # Convention ERB Ecobank :
+    # col I (DÉBIT)  = solde GL débiteur + suspens RB crédits inversés (versements non compensés)
+    # col J (CRÉDIT) = GL crédits REPORTÉS seulement (chèques rejetés reportés du mois précédent)
+    # SR_CP = col I - col J
     cp_sol_d = s_cp      if s_cp >= 0 else 0.0
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
     cp_susp_c_report = susp_cp_credit_report['credit'].sum() if not susp_cp_credit_report.empty else 0.0
-    cp_susp_c_rb     = susp_rb_credit['credit'].sum()        if not susp_rb_credit.empty        else 0.0
-    tot_d_cp = cp_sol_d
-    tot_c_cp = cp_sol_c + cp_susp_c_report + cp_susp_c_rb
-    # SR_CP = solde GL + |chèques rejetés| car les crédits GL sont des NÉGATIFS
-    # Convention ERB : SR_CP = tot_d_cp + tot_c_cp (les deux positifs, on additionne)
-    sr_cp    = tot_d_cp + tot_c_cp
+    # Suspens RB crédits → vont en DÉBIT journal (col I) car crédit relevé = débit journal
+    cp_susp_d_rb     = susp_rb_credit['credit'].sum()        if not susp_rb_credit.empty        else 0.0
+    tot_d_cp = cp_sol_d + cp_susp_d_rb   # solde GL + suspens RB crédits (en débit journal)
+    tot_c_cp = cp_sol_c + cp_susp_c_report  # crédits GL reportés seulement
+    sr_cp    = tot_d_cp - tot_c_cp
 
     chk = sr_rb - sr_cp; ok = abs(chk) < 0.5
     return dict(
@@ -1045,6 +1229,7 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         rb_sol_d=rb_sol_d, rb_sol_c=rb_sol_c, cp_sol_d=cp_sol_d, cp_sol_c=cp_sol_c,
         tot_d_rb=tot_d_rb, tot_c_rb=tot_c_rb, sr_rb=sr_rb,
         tot_d_cp=tot_d_cp, tot_c_cp=tot_c_cp, sr_cp=sr_cp, chk=chk, ok=ok,
+        cp_susp_d_rb=cp_susp_d_rb,
     )
 
 def build_erb_html(e, info):
@@ -1073,12 +1258,24 @@ def build_erb_html(e, info):
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
 
-    # COTE JOURNAL col J : GL credits reportes (cheques rejetes) + RB credits
-    rows_right = []
-    for _, r in susp_cp_credit_report.iterrows():
-        rows_right.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
+    # COTE JOURNAL :
+    # col I (DÉBIT)  : solde GL + suspens RB crédits (versements crédit relevé → débit journal)
+    # col J (CRÉDIT) : GL crédits REPORTÉS seulement (chèques rejetés du mois précédent)
+    rows_right_debit  = []  # col I — DÉBIT journal
+    rows_right_credit = []  # col J — CRÉDIT journal
+    # Suspens RB crédits → DÉBIT journal (col I)
     for _, r in susp_rb_credit.iterrows():
-        rows_right.append({'row': r, 'side': 'rb_credit', 'is_rep': _is_report(r.to_dict())})
+        rows_right_debit.append({'row': r, 'side': 'rb_credit_as_debit', 'is_rep': _is_report(r.to_dict())})
+    # GL crédits reportés → CRÉDIT journal (col J)
+    for _, r in susp_cp_credit_report.iterrows():
+        rows_right_credit.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
+    # Fusionner pour l'affichage ligne par ligne
+    rows_right = []
+    max_right = max(len(rows_right_debit), len(rows_right_credit))
+    for i in range(max_right):
+        d_item = rows_right_debit[i]  if i < len(rows_right_debit)  else None
+        c_item = rows_right_credit[i] if i < len(rows_right_credit) else None
+        rows_right.append({'debit_item': d_item, 'credit_item': c_item})
 
     n_rows = max(len(rows_left), len(rows_right), 8)
     periode = info.get('pe','')
@@ -1149,17 +1346,38 @@ def build_erb_html(e, info):
 
         # ── COTE JOURNAL ─────────────────────────────────────────────
         if i < len(rows_right):
-            item2 = rows_right[i]; r2 = item2['row']; side2 = item2['side']; is_rep2 = item2['is_rep']
-            lb2 = r2['lib']
-            if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
-            s_tx2 = S['RR'] if is_rep2 else S['CP']
-            s_num2 = S['RRR'] if is_rep2 else S['CPR']
-            # GL credits reportes → col J (credit journal, valeur negative)
-            # RB credits → col J (credit journal)
-            c2 = fmt_fr(r2['credit']) if r2['credit'] > 0 else ''
-            h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
-                  f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
-                  f'<td style="{s_num2}"></td><td style="{s_num2}">{c2}</td></tr>')
+            pair = rows_right[i]
+            d_item = pair.get('debit_item')   # col I — DÉBIT
+            c_item = pair.get('credit_item')  # col J — CRÉDIT
+            if d_item:
+                r2 = d_item['row']; is_rep2 = d_item['is_rep']
+                lb2 = r2['lib']
+                if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
+                s_tx2 = S['RR'] if is_rep2 else S['CP']
+                s_num2 = S['RRR'] if is_rep2 else S['CPR']
+                # RB crédit → DÉBIT journal (col I) — montant en débit
+                d2 = fmt_fr(r2['credit']) if r2['credit'] > 0 else ''
+                c2 = fmt_fr(c_item['row']['credit']) if c_item and c_item['row']['credit'] > 0 else ''
+                lb_c = ''
+                if c_item:
+                    lb_c_r = c_item['row']['lib']
+                    if c_item['is_rep']: lb_c_r = f'[↩ {c_item["row"].get("carry_from","")}] {lb_c_r}'
+                h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
+                      f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
+                      f'<td style="{s_num2}">{d2}</td><td style="{s_num2}">{c2}</td></tr>')
+            elif c_item:
+                r2 = c_item['row']; is_rep2 = c_item['is_rep']
+                lb2 = r2['lib']
+                if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
+                s_tx2 = S['RR'] if is_rep2 else S['CP']
+                s_num2 = S['RRR'] if is_rep2 else S['CPR']
+                c2 = fmt_fr(r2['credit']) if r2['credit'] > 0 else ''
+                h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
+                      f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
+                      f'<td style="{s_num2}"></td><td style="{s_num2}">{c2}</td></tr>')
+            else:
+                h += (f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td>'
+                      f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td><td style="{S["EC"]}"></td></tr>')
         else:
             h += (f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td>'
                   f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td><td style="{S["EC"]}"></td></tr>')
@@ -1198,11 +1416,21 @@ def export_xlsx(e, info):
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
-    rows_right = []
-    for _, r in susp_cp_credit_report.iterrows():
-        rows_right.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
+    # col I (DÉBIT journal)  : suspens RB crédits → débit journal
+    # col J (CRÉDIT journal) : GL crédits reportés seulement
+    rows_right_debit  = []
+    rows_right_credit = []
     for _, r in susp_rb_credit.iterrows():
-        rows_right.append({'row': r, 'side': 'rb_credit', 'is_rep': _is_report(r.to_dict())})
+        rows_right_debit.append({'row': r, 'side': 'rb_credit_as_debit', 'is_rep': _is_report(r.to_dict())})
+    for _, r in susp_cp_credit_report.iterrows():
+        rows_right_credit.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
+    max_right = max(len(rows_right_debit), len(rows_right_credit))
+    rows_right = []
+    for i in range(max_right):
+        rows_right.append({
+            'debit_item':  rows_right_debit[i]  if i < len(rows_right_debit)  else None,
+            'credit_item': rows_right_credit[i] if i < len(rows_right_credit) else None,
+        })
 
     n_rows = max(len(rows_left), len(rows_right), 8)
     periode = info.get('pe','')
@@ -1276,14 +1504,23 @@ def export_xlsx(e, info):
             for c in range(1,6): ws.cell(row=row,column=c).fill=BE; ws.cell(row=row,column=c).border=tb()
 
         if i < len(rows_right):
-            item2 = rows_right[i]; r2 = item2['row']; side2 = item2['side']; is_rep2 = item2['is_rep']
-            cp_fl = RL if is_rep2 else OL
-            lb2 = r2['lib']
+            pair2   = rows_right[i]
+            d_item2 = pair2.get('debit_item')   # col 9 — DÉBIT journal
+            c_item2 = pair2.get('credit_item')  # col 10 — CRÉDIT journal
+            # Prendre la ligne principale pour date/libellé
+            main2    = d_item2 if d_item2 else c_item2
+            r2       = main2['row']; is_rep2 = main2['is_rep']
+            cp_fl    = RL if is_rep2 else OL
+            lb2      = r2['lib']
             if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
-            cp_c = r2['credit'] if r2['credit'] > 0 else None
-            cell(row,6,r2['date'],cp_fl,bold=is_rep2); cell(row,7,lb2,cp_fl,bold=is_rep2)
+            cell(row,6,r2['date'],cp_fl,bold=is_rep2)
+            cell(row,7,lb2,cp_fl,bold=is_rep2)
             cell(row,8,r2.get('piece',''),cp_fl,bold=is_rep2)
-            for col,val in [(9,None),(10,cp_c)]:
+            # col 9 = DÉBIT journal (suspens RB crédit → débit journal)
+            val_d9  = d_item2['row']['credit'] if d_item2 and d_item2['row']['credit'] > 0 else None
+            # col 10 = CRÉDIT journal (GL crédits reportés)
+            val_c10 = c_item2['row']['credit'] if c_item2 and c_item2['row']['credit'] > 0 else None
+            for col,val in [(9, val_d9),(10, val_c10)]:
                 ws.cell(row=row,column=col,value=val).fill=cp_fl
                 ws.cell(row=row,column=col).alignment=Alignment(horizontal='right')
                 ws.cell(row=row,column=col).font=Font(bold=is_rep2,size=10)
@@ -1432,14 +1669,73 @@ def page_import(side):
     icon ="📥" if side=='rb' else "📄"
     st.markdown(f'<div class="page-title">{icon} Import — {label}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="page-sub">Chargez votre fichier Excel ou CSV</div>', unsafe_allow_html=True)
-    uploaded=st.file_uploader("Cliquez ici pour choisir votre fichier",type=['xlsx','xls','csv'],
+    uploaded=st.file_uploader("Cliquez ici pour choisir votre fichier",type=['xlsx','xls','csv','pdf'],
                                key=f'uploader_{side}',label_visibility='visible')
     if not uploaded: return
-    if uploaded.size > 10 * 1024 * 1024:
-        st.error(f"⚠️ Fichier trop volumineux ({uploaded.size/1024/1024:.1f} MB). Limite : 10 MB. Réduisez le fichier et réessayez.")
+    if uploaded.size > 20 * 1024 * 1024:
+        st.error(f"⚠️ Fichier trop volumineux ({uploaded.size/1024/1024:.1f} MB). Limite : 20 MB.")
         return
+    is_pdf = uploaded.name.lower().endswith('.pdf')
+    if is_pdf:
+        st.info("📄 PDF détecté — extraction automatique du tableau en cours...")
     df_raw=load_file(uploaded)
-    if df_raw is None: st.error("❌ Impossible de lire le fichier. Vérifiez qu'il s'agit d'un Excel (.xlsx/.xls) ou CSV valide."); return
+    if df_raw is None:
+        if is_pdf:
+            uploaded.seek(0)
+            _, pdf_err = _extract_pdf_tables(uploaded)
+            if pdf_err and "scanné" in pdf_err:
+                st.error("❌ **PDF scanné (image)** — Tentative de lecture par IA...")
+                # Essayer OCR via Claude
+                has_key = False
+                try:
+                    has_key = bool(st.secrets.get("ANTHROPIC_API_KEY",""))
+                except Exception:
+                    pass
+                if has_key:
+                    with st.spinner("🤖 L'IA lit votre relevé scanné... (peut prendre 15-30 secondes)"):
+                        uploaded.seek(0)
+                        df_ocr, ocr_err = _extract_pdf_scanned_via_claude(uploaded)
+                    if df_ocr is not None and not df_ocr.empty:
+                        st.success(f"✅ IA a extrait **{len(df_ocr)} transactions** du relevé scanné !")
+                        # Mapper directement les colonnes détectées
+                        rename_map = {"libelle":"Libellé","date":"Date","piece":"Réf.","debit":"Débit","credit":"Crédit"}
+                        df_show = df_ocr.rename(columns=rename_map)
+                        st.dataframe(df_show, use_container_width=True, hide_index=True, height=250)
+                        # Convertir en format attendu par l'app
+                        df_proc = pd.DataFrame({
+                            "date":    df_ocr.get("date",""),
+                            "lib":     df_ocr.get("libelle",""),
+                            "piece":   df_ocr.get("piece",""),
+                            "debit":   pd.to_numeric(df_ocr.get("debit",0), errors="coerce").fillna(0.0),
+                            "credit":  pd.to_numeric(df_ocr.get("credit",0), errors="coerce").fillna(0.0),
+                            "matched": False,
+                            "match_id": None,
+                        })
+                        # Filtrer lignes vides
+                        df_proc = df_proc[(df_proc["debit"]>0)|(df_proc["credit"]>0)].reset_index(drop=True)
+                        if side == "rb":
+                            st.session_state.rb_df = df_proc
+                            st.session_state.rb_map = {"date":"date","lib":"libelle","debit":"debit","credit":"credit"}
+                        else:
+                            st.session_state.cp_df = df_proc
+                            st.session_state.cp_map = {"date":"date","lib":"libelle","debit":"debit","credit":"credit"}
+                        st.success(f"✅ {len(df_proc)} lignes importées depuis le relevé scanné.")
+                        st.rerun()
+                        return
+                    else:
+                        st.error(f"❌ Lecture IA échouée : {ocr_err}")
+                        st.warning("Essayez : ilovepdf.com → PDF to Excel, puis importez l'Excel.")
+                else:
+                    st.warning("""**PDF scanné — Solutions :**
+- **Recommandé** : Ajoutez `ANTHROPIC_API_KEY` dans `.streamlit/secrets.toml` pour lecture automatique par IA
+- **Méthode manuelle** : ilovepdf.com → "PDF to Excel" (gratuit), puis importez l'Excel
+- **Portail Ecobank** : exportez directement en PDF numérique ou Excel""")
+            else:
+                st.error(f"❌ Extraction PDF échouée : {pdf_err}")
+                st.info("💡 Convertissez en Excel via smallpdf.com ou ilovepdf.com.")
+        else:
+            st.error("❌ Impossible de lire le fichier. Vérifiez qu'il s'agit d'un Excel (.xlsx/.xls), CSV ou PDF valide.")
+        return
     hi=detect_header_row(df_raw)
     headers=df_raw.iloc[hi].fillna('').astype(str).str.strip().tolist()
     df_data=df_raw.iloc[hi+1:].copy(); df_data.columns=headers
