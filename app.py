@@ -100,9 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = "https://ngljmbidrzpeyhtvsbfe.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5nbGptYmlkcnpwZXlodHZzYmZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxMTgwODIsImV4cCI6MjA5NzY5NDA4Mn0.Mwwvr2FDV7V1gTRZmRhHpkgWxNZyPAl6Go5c76Aoe9A"
-
+SUPABASE_URL = ""
+SUPABASE_KEY = ""
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
     try:
@@ -314,7 +313,7 @@ hr { border-color: rgba(100,160,255,0.2) !important; }
 # ── Configuration SendGrid ────────────────────────────────────────────
 # Créez un compte sur sendgrid.com, générez une API Key,
 # et remplacez la valeur ci-dessous (ou utilisez st.secrets)
-SENDGRID_API_KEY  = "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"
+SENDGRID_API_KEY  = ""
 EMAIL_EXPEDITEUR  = "sowmarieta013@gmail.com"   # email vérifié dans SendGrid
 NOM_EXPEDITEUR    = "ERB Manager"
 
