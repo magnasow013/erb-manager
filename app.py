@@ -247,18 +247,18 @@ LICENCES = {
     #   "actif":      True/False
     # }
     "ERB-4C11-316D-54AB": {
-        "entreprise": "Alliance — Lamine Mbodj",
-        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "entreprise": "Alliance — Amadou Lamine MBODJ",
+        "domaines":   ["@Alliance-ac.sn"],
         "actif": True,
     },
     "ERB-3D3A-9BC8-037B": {
-        "entreprise": "Alliance — Khady",
-        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "entreprise": "Alliance — Khardiatou DIALLO KA",
+        "domaines":   ["@Alliance-ac.sn"],
         "actif": True,
     },
     "ERB-AA5D-5BA6-58B1": {
-        "entreprise": "Alliance — Diallo",
-        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "entreprise": "Alliance — Mamadou DIALLO",
+        "domaines":   ["@Alliance-ac.sn"],
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
