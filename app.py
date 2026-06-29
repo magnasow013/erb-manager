@@ -246,29 +246,29 @@ LICENCES = {
     #   "domaines":   ["@entreprise.com"],  # domaines email autorisés
     #   "actif":      True/False
     # }
-    "ERB-4C11-316D-53AB": {
-        "entreprise": "Client 1",
-        "domaines":   ["@gmail.com"],
-        "actif": True,
-    },
-    "ERB-3D3A-9BC8-036B": {
-        "entreprise": "Client 2",
+    "ERB-4C11-316D-54AB": {
+        "entreprise": "Alliance — Lamine Mbodj",
         "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
         "actif": True,
     },
-    "ERB-AA5D-5BA6-57B1": {
-        "entreprise": "Client 3",
-        "domaines":   ["@gmail.com"],
+    "ERB-3D3A-9BC8-037B": {
+        "entreprise": "Alliance — Khady",
+        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
+        "actif": True,
+    },
+    "ERB-AA5D-5BA6-58B1": {
+        "entreprise": "Alliance — Diallo",
+        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
-        "entreprise": "Client 4",
-        "domaines":   ["@gmail.com"],
+        "entreprise": "Alliance",
+        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
         "actif": True,
     },
     "ERB-B987-B122-E9BE": {
         "entreprise": "Client 5",
-        "domaines":   ["@gmail.com"],
+        "domaines":   ["@gmail.com", "@Alliance-ac.sn"],
         "actif": True,
     },
 }
