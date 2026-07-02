@@ -348,6 +348,7 @@ LICENCES = {
         "entreprise": "Client 5",
         "domaines":   ["@gmail.com"],
         "actif": True,
+    
     },
 }
 
@@ -916,14 +917,10 @@ def apply_map(df_raw, col_map):
                 except: return 0.0
             d_raw = _pn_signed(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
             c_raw = _pn_signed(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
-            # Valeur négative dans CRÉDIT = annulation chèque → inverser en DÉBIT
-            # Valeur négative dans DÉBIT  = annulation versement → inverser en CRÉDIT
-            if c_raw < 0 and d_raw == 0:
-                D = abs(c_raw); C = 0.0
-            elif d_raw < 0 and c_raw == 0:
-                D = 0.0; C = abs(d_raw)
-            else:
-                D = abs(d_raw); C = abs(c_raw)
+            # Conserver le signe dans la même colonne — abs() pour avoir le montant positif
+            # Un montant négatif en CRÉDIT reste en CRÉDIT (valeur absolue)
+            # Un montant négatif en DÉBIT reste en DÉBIT (valeur absolue)
+            D = abs(d_raw); C = abs(c_raw)
         if D == 0 and C == 0: continue
         lib = str(row.get(col_map.get('lib','__'),'')).strip() if 'lib' in col_map else ''
         if is_excluded(lib):
@@ -1006,8 +1003,10 @@ def _run_match(rb, cp, inversion):
 
 def auto_match(rb_df, cp_df, inversion=True):
     st.session_state.mc = getattr(st.session_state, 'mc', 0)
-    has_carried = 'carried' in rb_df.columns
-    if has_carried:
+
+    # ── Séparer carries et courants côté RB ──────────────────────────
+    has_carried_rb = 'carried' in rb_df.columns
+    if has_carried_rb:
         mask_c     = rb_df['carried'].fillna(False).astype(bool)
         rb_courant = rb_df[~mask_c].copy().reset_index(drop=True)
         rb_carry   = rb_df[ mask_c].copy().reset_index(drop=True)
@@ -1016,9 +1015,53 @@ def auto_match(rb_df, cp_df, inversion=True):
         rb_carry   = pd.DataFrame(columns=rb_df.columns if len(rb_df) else
                                   ['date','lib','piece','debit','credit','matched','match_id'])
 
+    # ── Séparer carries et courants côté GL ──────────────────────────
+    has_carried_cp = 'carried' in cp_df.columns
+    if has_carried_cp:
+        mask_cp_c   = cp_df['carried'].fillna(False).astype(bool)
+        cp_courant  = cp_df[~mask_cp_c].copy().reset_index(drop=True)
+        cp_carry    = cp_df[ mask_cp_c].copy().reset_index(drop=True)
+    else:
+        cp_courant  = cp_df.copy().reset_index(drop=True)
+        cp_carry    = pd.DataFrame(columns=cp_df.columns if len(cp_df) else
+                                   ['date','lib','piece','debit','credit','matched','match_id'])
+
+    # ── PASSE 0 : carry GL ↔ cp_courant (même sens/montant) ──────────
+    # Un suspens GL CRÉDIT reporté (ex: chèque émis en fév) peut avoir sa
+    # contrepartie CRÉDIT dans le GL mars (même écriture re-comptabilisée).
+    # On les régularise : les deux disparaissent complètement.
+    p0_cnt = 0; cp_reserved_p0 = set(); cp_carry_reserved = set()
+    if len(cp_carry) > 0:
+        cp_carry['matched']  = False
+        cp_carry['match_id'] = None
+        for ci in cp_carry.index:
+            carry_d = cp_carry.at[ci, 'debit']
+            carry_c = cp_carry.at[ci, 'credit']
+            if carry_d == 0 and carry_c == 0: continue
+            for ri in cp_courant.index:
+                if ri in cp_reserved_p0: continue
+                cur_d = cp_courant.at[ri, 'debit']
+                cur_c = cp_courant.at[ri, 'credit']
+                # Même sens : crédit↔crédit OU débit↔débit
+                if (carry_c > 0 and abs(carry_c - cur_c) <= 1) or                    (carry_d > 0 and abs(carry_d - cur_d) <= 1):
+                    mid = f"CP0_{ci}_{ri}"
+                    cp_carry.at[ci, 'matched']    = True
+                    cp_carry.at[ci, 'match_id']   = mid
+                    cp_courant.at[ri, 'matched']  = True
+                    cp_courant.at[ri, 'match_id'] = mid
+                    cp_reserved_p0.add(ri)
+                    cp_carry_reserved.add(ci)
+                    p0_cnt += 1; break
+
+    # Carries GL non régularisés → restent comme suspens GL reportés
+    cp_carry_non_reg = cp_carry[~cp_carry['matched'].fillna(False)].copy() if len(cp_carry) > 0 else pd.DataFrame(columns=cp_df.columns)
+    # cp_df pour les passes suivantes = courants libres + carries non régularisés
+    cp_df_for_match = pd.concat(
+        [cp_courant[~cp_courant['matched'].fillna(False)], cp_carry_non_reg],
+        ignore_index=True
+    )
+
     # ── PASSE 1 : carryover_rb ↔ rb_courant (même sens, même montant) ──
-    # Suspens RELEVÉ DÉBIT de juin → matcher avec DÉBIT courant de même montant
-    # Les deux matchés disparaissent du tableau ERB (régularisation)
     rb_carry_out = rb_carry.copy()
     p1_cnt = 0; rb_reserved = set()
 
@@ -1034,9 +1077,7 @@ def auto_match(rb_df, cp_df, inversion=True):
                 if ri in rb_reserved: continue
                 cur_d = rb_courant.at[ri,'debit']
                 cur_c = rb_courant.at[ri,'credit']
-                # Même sens : débit↔débit  OU  crédit↔crédit
-                if (carry_d > 0 and abs(carry_d - cur_d) <= 1) or \
-                   (carry_c > 0 and abs(carry_c - cur_c) <= 1):
+                if (carry_d > 0 and abs(carry_d - cur_d) <= 1) or                    (carry_c > 0 and abs(carry_c - cur_c) <= 1):
                     mc1 += 1; mid = f"C{mc1}"
                     rb_carry_out.at[ci,'matched']  = True
                     rb_carry_out.at[ci,'match_id'] = mid
@@ -1045,13 +1086,38 @@ def auto_match(rb_df, cp_df, inversion=True):
                     rb_reserved.add(ri)
                     p1_cnt += 1; break
 
-    # ── PASSE 2 : rb_courant libres ↔ cp_df (3 stratégies) ──────────
+    # ── PASSE 1b : carry_rb non régularisés ↔ cp_df (inversion D/C) ──
+    cp_reserved = set()
+    if len(rb_carry_out) > 0:
+        mc1b = st.session_state.mc
+        cp_tmp = cp_df_for_match.copy().reset_index(drop=True)
+        for ci in rb_carry_out.index:
+            if rb_carry_out.at[ci, 'matched']: continue
+            carry_d = rb_carry_out.at[ci, 'debit']
+            carry_c = rb_carry_out.at[ci, 'credit']
+            if carry_d == 0 and carry_c == 0: continue
+            for cj in cp_tmp.index:
+                if cp_tmp.at[cj, 'matched'] or cj in cp_reserved: continue
+                cp_d = cp_tmp.at[cj, 'debit']
+                cp_c = cp_tmp.at[cj, 'credit']
+                matched_inv = (carry_d > 0 and abs(carry_d - cp_c) <= 1) or                               (carry_c > 0 and abs(carry_c - cp_d) <= 1)
+                if matched_inv:
+                    mc1b += 1; mid = f"P{mc1b}"
+                    rb_carry_out.at[ci, 'matched']  = True
+                    rb_carry_out.at[ci, 'match_id'] = mid
+                    cp_tmp.at[cj, 'matched']        = True
+                    cp_tmp.at[cj, 'match_id']       = mid
+                    cp_reserved.add(cj)
+                    p1_cnt += 1; break
+        cp_df_for_match = cp_tmp
+
+    # ── PASSE 2 : rb_courant libres ↔ cp_df_for_match (3 stratégies) ──
     rb_libre = rb_courant[~rb_courant['matched']].copy().reset_index(drop=True)
     rb_pris  = rb_courant[ rb_courant['matched']].copy().reset_index(drop=True)
 
-    rb2a, cp2a, cnt2a = _run_match(rb_libre, cp_df, inversion)
-    rb2b, cp2b, cnt2b = _run_match(rb_libre, cp_df, not inversion)
-    rb2c_a, cp2c_a, _ = _run_match(rb_libre, cp_df, True)
+    rb2a, cp2a, cnt2a = _run_match(rb_libre, cp_df_for_match, inversion)
+    rb2b, cp2b, cnt2b = _run_match(rb_libre, cp_df_for_match, not inversion)
+    rb2c_a, cp2c_a, _ = _run_match(rb_libre, cp_df_for_match, True)
     rb2c_u = rb2c_a[~rb2c_a['matched']].copy(); cp2c_u = cp2c_a[~cp2c_a['matched']].copy()
     if len(rb2c_u) > 0 and len(cp2c_u) > 0:
         rb2c_b, cp2c_b, _ = _run_match(rb2c_u, cp2c_u, False)
@@ -1070,6 +1136,7 @@ def auto_match(rb_df, cp_df, inversion=True):
     if len(rb_carry_non_reg) > 0:
         parts.append(rb_carry_non_reg)
     rb_out = pd.concat(parts, ignore_index=True)
+    # cp_out = résultat passe 2 (déjà filtré des carries régularisés en passe 0)
     cp_out = cp_p2
     total  = p1_cnt + p2_cnt
 
@@ -1208,29 +1275,75 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_credit_courant = pd.DataFrame()
         susp_cp_credit_report  = pd.DataFrame()
 
-    # COTE RELEVE
+    # ═══════════════════════════════════════════════════════════════════
+    # CONVENTION ERB ECOBANK — FORMULES MATHÉMATIQUEMENT EXACTES
+    # ───────────────────────────────────────────────────────────────────
+    # Identité Ecobank : S_RB = S_CP + ΣRB_D + ΣGL_C
+    #
+    # CÔTÉ RELEVÉ :
+    #   col D = ΣRB_D  (suspens DÉBIT relevé : chèques tirés non encore compensés)
+    #   col E = S_RB   (solde final relevé)
+    #   SR_RB = col E - col D = S_RB - ΣRB_D
+    #
+    # CÔTÉ JOURNAL :
+    #   col I = S_CP   (solde final GL)
+    #   col J = ΣGL_C  (suspens CRÉDIT GL : chèques rejetés, affiché négatif)
+    #   SR_CP = col I + col J = S_CP + ΣGL_C
+    #
+    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C
+    #
+    # ΣRB_D = suspens relevé DÉBIT  (all : courants + reportés)
+    # ΣRB_C = suspens relevé CRÉDIT (versements relevé sans GL — non inclus dans SR)
+    # ΣGL_C = suspens GL CRÉDIT     (chèques rejetés, courants + reportés)
+    # ΣGL_D = suspens GL DÉBIT      (encaissements GL sans relevé — non inclus dans SR)
+    # ═══════════════════════════════════════════════════════════════════
+
+    # Calcul des sommes de suspens
+    sum_susp_rb_d = susp_rb_debit['debit'].sum()            if not susp_rb_debit.empty          else 0.0
+    sum_susp_rb_c = susp_rb_credit['credit'].sum()          if not susp_rb_credit.empty         else 0.0
+    sum_susp_gl_d = susp_cp_debit['debit'].sum()            if not susp_cp_debit.empty          else 0.0
+    sum_susp_gl_c = (susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0) +                     (susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # CONVENTION ERB ECOBANK — FORMULES EXACTES (validées sur ERB manuel)
+    # ───────────────────────────────────────────────────────────────────
+    # Identité : S_RB = S_CP + ΣRB_D + ΣGL_C_courant + ΣGL_C_reporté
+    #
+    # Col D (côté relevé) = ΣRB_D + ΣGL_C_courant
+    #   (suspens DÉBIT relevé + chèques émis GL non compensés au relevé)
+    # Col E (côté relevé) = S_RB
+    #   SR_RB = S_RB - ΣRB_D - ΣGL_C_courant
+    #
+    # Col I (côté journal) = S_CP
+    # Col J (côté journal) = ΣGL_C_reporté  (chèques rejetés reportés, affiché négatif)
+    #   SR_CP = S_CP + ΣGL_C_reporté
+    #
+    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C (toutes ΣGL_C)
+    # ═══════════════════════════════════════════════════════════════════
+
+    sum_susp_gl_c_courant = susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
+    sum_susp_gl_c_report  = susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0
+
+    # Soldes rapprochés — convention Ecobank exacte
+    sr_rb = s_rb - sum_susp_rb_d - sum_susp_gl_c_courant
+    sr_cp = s_cp + sum_susp_gl_c_report
+
+    # Variables de présentation tableau ERB
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
     rb_sol_c = s_rb      if s_rb >= 0 else 0.0
-    rb_susp_d_rb         = susp_rb_debit['debit'].sum()              if not susp_rb_debit.empty          else 0.0
-    rb_susp_d_gl_courant = susp_cp_credit_courant['credit'].sum()    if not susp_cp_credit_courant.empty else 0.0
-    rb_susp_c_gl_debit   = susp_cp_debit['debit'].sum()              if not susp_cp_debit.empty          else 0.0
-    tot_d_rb = rb_sol_d + rb_susp_d_rb + rb_susp_d_gl_courant
-    tot_c_rb = rb_sol_c + rb_susp_c_gl_debit
-    sr_rb    = tot_c_rb - tot_d_rb
-
-    # COTE JOURNAL
-    # Convention ERB Ecobank :
-    # col I (DÉBIT)  = solde GL débiteur + suspens RB crédits inversés (versements non compensés)
-    # col J (CRÉDIT) = GL crédits REPORTÉS seulement (chèques rejetés reportés du mois précédent)
-    # SR_CP = col I - col J
     cp_sol_d = s_cp      if s_cp >= 0 else 0.0
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
-    cp_susp_c_report = susp_cp_credit_report['credit'].sum() if not susp_cp_credit_report.empty else 0.0
-    # Suspens RB crédits → vont en DÉBIT journal (col I) car crédit relevé = débit journal
-    cp_susp_d_rb     = susp_rb_credit['credit'].sum()        if not susp_rb_credit.empty        else 0.0
-    tot_d_cp = cp_sol_d + cp_susp_d_rb   # solde GL + suspens RB crédits (en débit journal)
-    tot_c_cp = cp_sol_c + cp_susp_c_report  # crédits GL reportés seulement
-    sr_cp    = tot_d_cp - tot_c_cp
+    cp_susp_d_rb     = sum_susp_rb_c
+    cp_susp_c_report = sum_susp_gl_c_report
+
+    # Totaux affichage tableau
+    rb_susp_d_rb         = sum_susp_rb_d
+    rb_susp_d_gl_courant = sum_susp_gl_c_courant  # GL crédits courants → col D relevé
+    rb_susp_c_gl_debit   = sum_susp_gl_d
+    tot_d_rb = rb_sol_d + rb_susp_d_rb + rb_susp_d_gl_courant
+    tot_c_rb = rb_sol_c
+    tot_d_cp = cp_sol_d
+    tot_c_cp = cp_sol_c + sum_susp_gl_c_report   # col J = ΣGL_C reportés seulement
 
     chk = sr_rb - sr_cp; ok = abs(chk) < 0.5
     return dict(
