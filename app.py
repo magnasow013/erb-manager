@@ -324,29 +324,29 @@ LICENCES = {
     #   "domaines":   ["@entreprise.com"],  # domaines email autorisés
     #   "actif":      True/False
     # }
-    "ERB-4C11-316D-54AB": {
-        "entreprise": "Alliance — Amadou Lamine MBODJ",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-4C11-316D-53AB": {
+        "entreprise": "Client 1",
+        "domaines":   ["@client1.com"],
         "actif": True,
     },
-    "ERB-3D3A-9BC8-037B": {
-        "entreprise": "Alliance — Khardiatou DIALLO KA",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-3D3A-9BC8-036B": {
+        "entreprise": "Client 2",
+        "domaines":   ["@client2.com", "@client2.sn"],
         "actif": True,
     },
-    "ERB-AA5D-5BA6-58B1": {
-        "entreprise": "Alliance — Mamadou DIALLO",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-AA5D-5BA6-57B1": {
+        "entreprise": "Client 3",
+        "domaines":   ["@client3.com"],
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
         "entreprise": "Client 4",
-        "domaines":   ["@gmail.com"],
+        "domaines":   ["@client4.com"],
         "actif": True,
     },
     "ERB-B987-B122-E9BE": {
         "entreprise": "Client 5",
-        "domaines":   ["@gmail.com"],
+        "domaines":   ["@client5.com"],
         "actif": True,
     },
 }
@@ -916,14 +916,10 @@ def apply_map(df_raw, col_map):
                 except: return 0.0
             d_raw = _pn_signed(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
             c_raw = _pn_signed(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
-            # Valeur négative dans CRÉDIT = annulation chèque → inverser en DÉBIT
-            # Valeur négative dans DÉBIT  = annulation versement → inverser en CRÉDIT
-            if c_raw < 0 and d_raw == 0:
-                D = abs(c_raw); C = 0.0
-            elif d_raw < 0 and c_raw == 0:
-                D = 0.0; C = abs(d_raw)
-            else:
-                D = abs(d_raw); C = abs(c_raw)
+            # Conserver le signe dans la même colonne — abs() pour avoir le montant positif
+            # Un montant négatif en CRÉDIT reste en CRÉDIT (valeur absolue)
+            # Un montant négatif en DÉBIT reste en DÉBIT (valeur absolue)
+            D = abs(d_raw); C = abs(c_raw)
         if D == 0 and C == 0: continue
         lib = str(row.get(col_map.get('lib','__'),'')).strip() if 'lib' in col_map else ''
         if is_excluded(lib):
@@ -1044,6 +1040,34 @@ def auto_match(rb_df, cp_df, inversion=True):
                     rb_courant.at[ri,'match_id']   = mid
                     rb_reserved.add(ri)
                     p1_cnt += 1; break
+
+    # ── PASSE 1b : carry_rb non régularisés ↔ cp_df (inversion D/C) ──
+    # Ex : suspens RB DÉBIT d'octobre + GL CRÉDIT novembre (annulation chèque)
+    cp_reserved = set()
+    if len(rb_carry_out) > 0:
+        mc1b = st.session_state.mc
+        cp_tmp = cp_df.copy().reset_index(drop=True)
+        for ci in rb_carry_out.index:
+            if rb_carry_out.at[ci, 'matched']: continue  # déjà régularisé passe 1
+            carry_d = rb_carry_out.at[ci, 'debit']
+            carry_c = rb_carry_out.at[ci, 'credit']
+            if carry_d == 0 and carry_c == 0: continue
+            for cj in cp_tmp.index:
+                if cp_tmp.at[cj, 'matched'] or cj in cp_reserved: continue
+                cp_d = cp_tmp.at[cj, 'debit']
+                cp_c = cp_tmp.at[cj, 'credit']
+                # Inversion D/C : carry DÉBIT ↔ GL CRÉDIT, carry CRÉDIT ↔ GL DÉBIT
+                matched_inv = (carry_d > 0 and abs(carry_d - cp_c) <= 1) or                               (carry_c > 0 and abs(carry_c - cp_d) <= 1)
+                if matched_inv:
+                    mc1b += 1; mid = f"P{mc1b}"
+                    rb_carry_out.at[ci, 'matched']  = True
+                    rb_carry_out.at[ci, 'match_id'] = mid
+                    cp_tmp.at[cj, 'matched']        = True
+                    cp_tmp.at[cj, 'match_id']       = mid
+                    cp_reserved.add(cj)
+                    p1_cnt += 1; break
+        # Mettre à jour cp_df avec les nouvelles correspondances
+        cp_df = cp_tmp
 
     # ── PASSE 2 : rb_courant libres ↔ cp_df (3 stratégies) ──────────
     rb_libre = rb_courant[~rb_courant['matched']].copy().reset_index(drop=True)
