@@ -102,6 +102,7 @@ def _extract_pdf_tables(uploaded_file):
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = ""
 SUPABASE_KEY = ""
+
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
     try:
@@ -323,29 +324,29 @@ LICENCES = {
     #   "domaines":   ["@entreprise.com"],  # domaines email autorisés
     #   "actif":      True/False
     # }
-    "ERB-4C11-316D-54AB": {
-        "entreprise": "Alliance — Amadou Lamine MBODJ",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-4C11-316D-53AB": {
+        "entreprise": "Client 1",
+        "domaines":   ["@client1.com"],
         "actif": True,
     },
-    "ERB-3D3A-9BC8-037B": {
-        "entreprise": "Alliance — Khardiatou DIALLO KA",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-3D3A-9BC8-036B": {
+        "entreprise": "Client 2",
+        "domaines":   ["@client2.com", "@client2.sn"],
         "actif": True,
     },
-    "ERB-AA5D-5BA6-58B1": {
-        "entreprise": "Alliance — Mamadou DIALLO",
-        "domaines":   ["@Alliance-ac.sn"],
+    "ERB-AA5D-5BA6-57B1": {
+        "entreprise": "Client 3",
+        "domaines":   ["@client3.com"],
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
         "entreprise": "Client 4",
-        "domaines":   ["@gmail.com"],
+        "domaines":   ["@client4.com"],
         "actif": True,
     },
     "ERB-B987-B122-E9BE": {
         "entreprise": "Client 5",
-        "domaines":   ["@gmail.com"],
+        "domaines":   ["@client5.com"],
         "actif": True,
     },
 }
@@ -726,7 +727,7 @@ for k, v in DEFAULTS.items():
 # UTILITAIRES
 # ───────────────────────────────────────────────────────────────────────
 def pn(v):
-    if v is None or (isinstance(v, float) and np.isnan(v)) or str(v).strip() in ('','nan','None'):
+    if v is None or (isinstance(v, float) and np.isnan(v)) or str(v).strip() in ('','nan','None','-','—'):
         return 0.0
     try: return float(str(v).replace(' ','').replace('\xa0','').replace(',','.'))
     except: return 0.0
@@ -908,8 +909,21 @@ def apply_map(df_raw, col_map):
                 D, C = (ab, 0.0) if mt < 0 else (0.0, ab)
         else:
             d_col = col_map.get('debit'); c_col = col_map.get('credit')
-            D = pn(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
-            C = pn(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
+            # Lire valeurs brutes avec signe pour détecter les annulations (valeurs négatives)
+            def _pn_signed(val):
+                if val is None or str(val).strip() in ('','nan','None','-','—'): return 0.0
+                try: return float(str(val).replace(' ','').replace('\xa0','').replace(',','.'))
+                except: return 0.0
+            d_raw = _pn_signed(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
+            c_raw = _pn_signed(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
+            # Valeur négative dans CRÉDIT = annulation chèque → inverser en DÉBIT
+            # Valeur négative dans DÉBIT  = annulation versement → inverser en CRÉDIT
+            if c_raw < 0 and d_raw == 0:
+                D = abs(c_raw); C = 0.0
+            elif d_raw < 0 and c_raw == 0:
+                D = 0.0; C = abs(d_raw)
+            else:
+                D = abs(d_raw); C = abs(c_raw)
         if D == 0 and C == 0: continue
         lib = str(row.get(col_map.get('lib','__'),'')).strip() if 'lib' in col_map else ''
         if is_excluded(lib):
