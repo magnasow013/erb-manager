@@ -101,8 +101,7 @@ def _extract_pdf_tables(uploaded_file):
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = ""
-SUPABASE_KEY = ""
-
+SUPABASE_KEY = "" 
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -1305,9 +1304,29 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     sum_susp_gl_d = susp_cp_debit['debit'].sum()            if not susp_cp_debit.empty          else 0.0
     sum_susp_gl_c = (susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0) +                     (susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # CONVENTION ERB ECOBANK — FORMULES EXACTES (validées sur ERB manuel)
+    # ───────────────────────────────────────────────────────────────────
+    # Identité : S_RB = S_CP + ΣRB_D + ΣGL_C_courant + ΣGL_C_reporté
+    #
+    # Col D (côté relevé) = ΣRB_D + ΣGL_C_courant
+    #   (suspens DÉBIT relevé + chèques émis GL non compensés au relevé)
+    # Col E (côté relevé) = S_RB
+    #   SR_RB = S_RB - ΣRB_D - ΣGL_C_courant
+    #
+    # Col I (côté journal) = S_CP
+    # Col J (côté journal) = ΣGL_C_reporté  (chèques rejetés reportés, affiché négatif)
+    #   SR_CP = S_CP + ΣGL_C_reporté
+    #
+    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C (toutes ΣGL_C)
+    # ═══════════════════════════════════════════════════════════════════
+
+    sum_susp_gl_c_courant = susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
+    sum_susp_gl_c_report  = susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0
+
     # Soldes rapprochés — convention Ecobank exacte
-    sr_rb = s_rb - sum_susp_rb_d   # col E - col D
-    sr_cp = s_cp + sum_susp_gl_c   # col I + col J (col J = ΣGL_C positif, affiché négatif)
+    sr_rb = s_rb - sum_susp_rb_d - sum_susp_gl_c_courant
+    sr_cp = s_cp + sum_susp_gl_c_report
 
     # Variables de présentation tableau ERB
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
@@ -1315,16 +1334,16 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     cp_sol_d = s_cp      if s_cp >= 0 else 0.0
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
     cp_susp_d_rb     = sum_susp_rb_c
-    cp_susp_c_report = susp_cp_credit_report['credit'].sum() if not susp_cp_credit_report.empty else 0.0
+    cp_susp_c_report = sum_susp_gl_c_report
 
     # Totaux affichage tableau
     rb_susp_d_rb         = sum_susp_rb_d
-    rb_susp_d_gl_courant = 0.0   # GL crédits ne vont plus en col D relevé
+    rb_susp_d_gl_courant = sum_susp_gl_c_courant  # GL crédits courants → col D relevé
     rb_susp_c_gl_debit   = sum_susp_gl_d
-    tot_d_rb = rb_sol_d + rb_susp_d_rb
+    tot_d_rb = rb_sol_d + rb_susp_d_rb + rb_susp_d_gl_courant
     tot_c_rb = rb_sol_c
     tot_d_cp = cp_sol_d
-    tot_c_cp = cp_sol_c + sum_susp_gl_c   # col J = ΣGL_C (valeur positive, affiché négatif)
+    tot_c_cp = cp_sol_c + sum_susp_gl_c_report   # col J = ΣGL_C reportés seulement
 
     chk = sr_rb - sr_cp; ok = abs(chk) < 0.5
     return dict(
