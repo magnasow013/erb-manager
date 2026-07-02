@@ -103,6 +103,7 @@ def _extract_pdf_tables(uploaded_file):
 SUPABASE_URL = ""
 SUPABASE_KEY = ""
 
+
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
     try:
@@ -1276,19 +1277,26 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_credit_report  = pd.DataFrame()
 
     # ═══════════════════════════════════════════════════════════════════
-    # FORMULES MATHÉMATIQUEMENT EXACTES DU RAPPROCHEMENT BANCAIRE
+    # CONVENTION ERB ECOBANK — FORMULES MATHÉMATIQUEMENT EXACTES
     # ───────────────────────────────────────────────────────────────────
-    # Identité comptable :  S_RB = S_CP - ΣRB_D + ΣRB_C + ΣGL_C - ΣGL_D
+    # Identité Ecobank : S_RB = S_CP + ΣRB_D + ΣGL_C
     #
-    # SR_RB = S_RB - ΣRB_C - ΣGL_C   (relevé : enlève ce qui n'est qu'au relevé)
-    # SR_CP = S_CP - ΣRB_D - ΣGL_D   (GL : enlève ce qui n'est qu'au GL)
+    # CÔTÉ RELEVÉ :
+    #   col D = ΣRB_D  (suspens DÉBIT relevé : chèques tirés non encore compensés)
+    #   col E = S_RB   (solde final relevé)
+    #   SR_RB = col E - col D = S_RB - ΣRB_D
     #
-    # SR_RB = SR_CP toujours si les données sont cohérentes.
+    # CÔTÉ JOURNAL :
+    #   col I = S_CP   (solde final GL)
+    #   col J = ΣGL_C  (suspens CRÉDIT GL : chèques rejetés, affiché négatif)
+    #   SR_CP = col I + col J = S_CP + ΣGL_C
     #
-    # ΣRB_D = suspens relevé DÉBIT  (débits au relevé sans contrepartie GL)
-    # ΣRB_C = suspens relevé CRÉDIT (crédits au relevé sans contrepartie GL)
-    # ΣGL_D = suspens GL DÉBIT      (débits GL sans contrepartie relevé)
-    # ΣGL_C = suspens GL CRÉDIT     (crédits GL sans contrepartie relevé — courants + reportés)
+    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C
+    #
+    # ΣRB_D = suspens relevé DÉBIT  (all : courants + reportés)
+    # ΣRB_C = suspens relevé CRÉDIT (versements relevé sans GL — non inclus dans SR)
+    # ΣGL_C = suspens GL CRÉDIT     (chèques rejetés, courants + reportés)
+    # ΣGL_D = suspens GL DÉBIT      (encaissements GL sans relevé — non inclus dans SR)
     # ═══════════════════════════════════════════════════════════════════
 
     # Calcul des sommes de suspens
@@ -1297,26 +1305,26 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     sum_susp_gl_d = susp_cp_debit['debit'].sum()            if not susp_cp_debit.empty          else 0.0
     sum_susp_gl_c = (susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0) +                     (susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0)
 
-    # Soldes rapprochés — mathématiquement exacts
-    sr_rb = s_rb - sum_susp_rb_c - sum_susp_gl_c
-    sr_cp = s_cp - sum_susp_rb_d - sum_susp_gl_d
+    # Soldes rapprochés — convention Ecobank exacte
+    sr_rb = s_rb - sum_susp_rb_d   # col E - col D
+    sr_cp = s_cp + sum_susp_gl_c   # col I + col J (col J = ΣGL_C positif, affiché négatif)
 
-    # Variables de présentation ERB (convention Ecobank pour le tableau HTML/Excel)
+    # Variables de présentation tableau ERB
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
     rb_sol_c = s_rb      if s_rb >= 0 else 0.0
     cp_sol_d = s_cp      if s_cp >= 0 else 0.0
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
-    cp_susp_d_rb     = sum_susp_rb_c   # suspens RB crédits → col I DÉBIT journal
+    cp_susp_d_rb     = sum_susp_rb_c
     cp_susp_c_report = susp_cp_credit_report['credit'].sum() if not susp_cp_credit_report.empty else 0.0
 
-    # Totaux pour affichage tableau ERB
+    # Totaux affichage tableau
     rb_susp_d_rb         = sum_susp_rb_d
-    rb_susp_d_gl_courant = susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
+    rb_susp_d_gl_courant = 0.0   # GL crédits ne vont plus en col D relevé
     rb_susp_c_gl_debit   = sum_susp_gl_d
-    tot_d_rb = rb_sol_d + rb_susp_d_rb + rb_susp_d_gl_courant
-    tot_c_rb = rb_sol_c + rb_susp_c_gl_debit
-    tot_d_cp = cp_sol_d + cp_susp_d_rb
-    tot_c_cp = cp_sol_c + cp_susp_c_report
+    tot_d_rb = rb_sol_d + rb_susp_d_rb
+    tot_c_rb = rb_sol_c
+    tot_d_cp = cp_sol_d
+    tot_c_cp = cp_sol_c + sum_susp_gl_c   # col J = ΣGL_C (valeur positive, affiché négatif)
 
     chk = sr_rb - sr_cp; ok = abs(chk) < 0.5
     return dict(
