@@ -101,7 +101,7 @@ def _extract_pdf_tables(uploaded_file):
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = ""
-SUPABASE_KEY = "" 
+SUPABASE_KEY = ""
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -324,7 +324,7 @@ LICENCES = {
     #   "domaines":   ["@entreprise.com"],  # domaines email autorisés
     #   "actif":      True/False
     # }
-   "ERB-4C11-316D-54AB": {
+    "ERB-4C11-316D-54AB": {
         "entreprise": "Alliance — Amadou Lamine MBODJ",
         "domaines":   ["@Alliance-ac.sn"],
         "actif": True,
@@ -348,7 +348,6 @@ LICENCES = {
         "entreprise": "Client 5",
         "domaines":   ["@gmail.com"],
         "actif": True,
-
     },
 }
 
@@ -917,10 +916,14 @@ def apply_map(df_raw, col_map):
                 except: return 0.0
             d_raw = _pn_signed(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
             c_raw = _pn_signed(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
-            # Conserver le signe dans la même colonne — abs() pour avoir le montant positif
-            # Un montant négatif en CRÉDIT reste en CRÉDIT (valeur absolue)
-            # Un montant négatif en DÉBIT reste en DÉBIT (valeur absolue)
-            D = abs(d_raw); C = abs(c_raw)
+            # Valeur négative dans CRÉDIT = annulation chèque → inverser en DÉBIT
+            # Valeur négative dans DÉBIT  = annulation versement → inverser en CRÉDIT
+            if c_raw < 0 and d_raw == 0:
+                D = abs(c_raw); C = 0.0
+            elif d_raw < 0 and c_raw == 0:
+                D = 0.0; C = abs(d_raw)
+            else:
+                D = abs(d_raw); C = abs(c_raw)
         if D == 0 and C == 0: continue
         lib = str(row.get(col_map.get('lib','__'),'')).strip() if 'lib' in col_map else ''
         if is_excluded(lib):
