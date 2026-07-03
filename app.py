@@ -101,7 +101,7 @@ def _extract_pdf_tables(uploaded_file):
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = ""
-SUPABASE_KEY = ""
+SUPABASE_KEY = "" 
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -1741,10 +1741,13 @@ def importer_erb_fichier(uploaded_file, periode_source):
         rb_lib = str(row[1] or '').strip() if len(row)>1 else ''
         rb_d = pn_raw(row[3] if len(row)>3 else None)
         rb_c = pn_raw(row[4] if len(row)>4 else None)
-        if rb_lib and 'SOLDE AVANT' not in rb_lib.upper() and (rb_d>0 or rb_c>0):
+        # Importer uniquement les suspens RB DÉBIT (col D)
+        # Les suspens RB CRÉDIT (versements, col E) ne font pas partie du tableau ERB
+        # selon la convention Ecobank — ils ne doivent pas être reportés
+        if rb_lib and 'SOLDE AVANT' not in rb_lib.upper() and rb_d > 0:
             susp_rb.append({'date':fmt_date(row[0]),'lib':rb_lib,
                 'piece':str(row[2] or '').strip() if len(row)>2 else '',
-                'debit':rb_d,'credit':rb_c,'matched':False,'match_id':None,'carry_from':periode_source})
+                'debit':rb_d,'credit':0.0,'matched':False,'match_id':None,'carry_from':periode_source})
         cp_lib = str(row[6] or '').strip() if len(row)>6 else ''
         cp_d = pn_raw(row[8] if len(row)>8 else None)
         cp_c = pn_raw(row[9] if len(row)>9 else None)
