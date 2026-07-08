@@ -101,8 +101,7 @@ def _extract_pdf_tables(uploaded_file):
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
 SUPABASE_URL = ""
-SUPABASE_KEY = ""
-
+SUPABASE_KEY = "" 
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -349,7 +348,7 @@ LICENCES = {
         "entreprise": "Client 5",
         "domaines":   ["@gmail.com"],
         "actif": True,
-    
+
     },
 }
 
@@ -918,16 +917,10 @@ def apply_map(df_raw, col_map):
                 except: return 0.0
             d_raw = _pn_signed(row.get(d_col,0)) if d_col and d_col in df_raw.columns else 0.0
             c_raw = _pn_signed(row.get(c_col,0)) if c_col and c_col in df_raw.columns else 0.0
-            # Gestion des montants négatifs (avoirs, annulations, contre-passations) :
-            # Montant négatif en col DÉBIT  → c'est un avoir → va en CRÉDIT
-            # Montant négatif en col CRÉDIT → c'est une annulation → va en DÉBIT
-            # Montant positif → reste dans sa colonne
-            if d_raw < 0 and c_raw == 0.0:
-                D, C = 0.0, abs(d_raw)   # avoir en col débit → crédit
-            elif c_raw < 0 and d_raw == 0.0:
-                D, C = abs(c_raw), 0.0   # annulation en col crédit → débit
-            else:
-                D, C = abs(d_raw), abs(c_raw)
+            # Conserver le signe dans la même colonne — abs() pour avoir le montant positif
+            # Un montant négatif en CRÉDIT reste en CRÉDIT (valeur absolue)
+            # Un montant négatif en DÉBIT reste en DÉBIT (valeur absolue)
+            D = abs(d_raw); C = abs(c_raw)
         if D == 0 and C == 0: continue
         lib = str(row.get(col_map.get('lib','__'),'')).strip() if 'lib' in col_map else ''
         if is_excluded(lib):
@@ -1352,11 +1345,7 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     # ═══════════════════════════════════════════════════════════════════
 
     # Soldes rapprochés — convention Ecobank exacte
-    # SR_RB = S_RB + ΣGL_D - ΣRB_D - ΣGL_C_courant
-    #   ΣGL_D = encaissements GL sans relevé → col E crédit → augmentent SR_RB
-    # SR_CP = S_CP + ΣGL_C_report
-    # Identité : SR_RB = SR_CP si S_RB = S_CP + ΣRB_D + ΣGL_C - ΣGL_D
-    sr_rb = s_rb + sum_susp_gl_d - sum_susp_rb_d - sum_susp_gl_c_courant
+    sr_rb = s_rb - sum_susp_rb_d - sum_susp_gl_c_courant
     sr_cp = s_cp + sum_susp_gl_c_report
 
     # Variables de présentation tableau ERB
@@ -1749,38 +1738,19 @@ def importer_erb_fichier(uploaded_file, periode_source):
         if not any(v for v in row): continue
         lb1 = str(row[1] or '').strip().upper() if len(row)>1 else ''
         if any(k in lb1 for k in ('TOTAUX','SOLDES RAPPROCHES','SOLDE RAPPROCHE')): break
-
-        # ── CÔTÉ RELEVÉ (colonnes 0-4) ──────────────────────────────
         rb_lib = str(row[1] or '').strip() if len(row)>1 else ''
-        rb_d   = pn_raw(row[3] if len(row)>3 else None)   # col D = suspens RBD + GLC courants mélangés
-        rb_e   = pn_raw(row[4] if len(row)>4 else None)   # col E = suspens GL DÉBIT (encaissements GL sans relevé)
-
+        rb_d = pn_raw(row[3] if len(row)>3 else None)
+        rb_c = pn_raw(row[4] if len(row)>4 else None)
+        # Importer uniquement les suspens RB DÉBIT (col D)
+        # Les suspens RB CRÉDIT (versements, col E) ne font pas partie du tableau ERB
+        # selon la convention Ecobank — ils ne doivent pas être reportés
         if rb_lib and 'SOLDE AVANT' not in rb_lib.upper() and rb_d > 0:
-            # Classification col D : RB DÉBIT vs GL CRÉDIT courant
-            # Les vrais carries RB DÉBIT ont [↩] dans leur libellé (exportés avec carry_from)
-            # Les GL crédits courants n'ont PAS [↩] — ils viennent de la comptabilité
-            is_carry_rb = '[↩' in rb_lib or '↩' in rb_lib
-            if is_carry_rb:
-                # Suspens RB DÉBIT reporté → carryover_rb
-                susp_rb.append({'date':fmt_date(row[0]),'lib':rb_lib,
-                    'piece':str(row[2] or '').strip() if len(row)>2 else '',
-                    'debit':rb_d,'credit':0.0,'matched':False,'match_id':None,'carry_from':periode_source})
-            else:
-                # Suspens GL CRÉDIT courant (chèque émis non compensé) → carryover_cp crédit
-                susp_cp.append({'date':fmt_date(row[0]),'lib':rb_lib,
-                    'piece':str(row[2] or '').strip() if len(row)>2 else '',
-                    'debit':0.0,'credit':rb_d,'matched':False,'match_id':None,'carry_from':periode_source})
-
-        # Col E = suspens GL DÉBIT (encaissements GL sans relevé) → carryover_cp débit
-        if rb_lib and 'SOLDE AVANT' not in rb_lib.upper() and rb_e > 0:
-            susp_cp.append({'date':fmt_date(row[0]),'lib':rb_lib,
+            susp_rb.append({'date':fmt_date(row[0]),'lib':rb_lib,
                 'piece':str(row[2] or '').strip() if len(row)>2 else '',
-                'debit':rb_e,'credit':0.0,'matched':False,'match_id':None,'carry_from':periode_source})
-
-        # ── CÔTÉ JOURNAL (colonnes 5-9) ──────────────────────────────
+                'debit':rb_d,'credit':0.0,'matched':False,'match_id':None,'carry_from':periode_source})
         cp_lib = str(row[6] or '').strip() if len(row)>6 else ''
-        cp_d   = pn_raw(row[8] if len(row)>8 else None)   # col I = S_CP (ligne solde uniquement)
-        cp_c   = pn_raw(row[9] if len(row)>9 else None)   # col J = GL CRÉDIT reportés (chèques rejetés)
+        cp_d = pn_raw(row[8] if len(row)>8 else None)
+        cp_c = pn_raw(row[9] if len(row)>9 else None)
         if cp_lib and 'SOLDE AVANT' not in cp_lib.upper() and (cp_d>0 or cp_c>0):
             susp_cp.append({'date':fmt_date(row[5] if len(row)>5 else None),'lib':cp_lib,
                 'piece':str(row[7] or '').strip() if len(row)>7 else '',
@@ -2113,7 +2083,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.18")
+    st.caption("ERB v5.17")
 
 # ═══ ROUTING ══════════════════════════════════════════════════════════
 page=st.session_state.page
