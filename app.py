@@ -661,23 +661,6 @@ def auto_match(rb_df, cp_df, inversion=True):
                     rb_carry_out.at[ci,'matched'] = True; rb_carry_out.at[ci,'match_id'] = mid
                     rb_courant.at[ri,'matched'] = True; rb_courant.at[ri,'match_id'] = mid
                     rb_reserved.add(ri); p1_cnt += 1; break
-    # Passe 1c: annulation pattern — rb_carry debit cancels cp_courant debit of same amount
-    if len(rb_carry_out) > 0:
-        mc1c = st.session_state.mc
-        cp_tmp_1c = cp_df_for_match.copy().reset_index(drop=True)
-        for ci in rb_carry_out.index:
-            if rb_carry_out.at[ci, 'matched']: continue
-            carry_d = rb_carry_out.at[ci, 'debit']
-            if carry_d == 0: continue
-            for cj in cp_tmp_1c.index:
-                if cp_tmp_1c.at[cj, 'matched']: continue
-                cp_d = cp_tmp_1c.at[cj, 'debit']
-                if cp_d > 0 and abs(carry_d - cp_d) <= 1:
-                    mc1c += 1; mid = f"A{mc1c}"
-                    rb_carry_out.at[ci, 'matched'] = True; rb_carry_out.at[ci, 'match_id'] = mid
-                    cp_tmp_1c.at[cj, 'matched'] = True; cp_tmp_1c.at[cj, 'match_id'] = mid
-                    p1_cnt += 1; break
-        cp_df_for_match = cp_tmp_1c
     cp_reserved = set()
     if len(rb_carry_out) > 0:
         mc1b = st.session_state.mc
@@ -1443,7 +1426,7 @@ with st.sidebar:
             help="Fermer la session et revenir à l'écran de licence"):
         for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.9")
+    st.caption("ERB v5.8")
 
 # === ROUTING ===
 page=st.session_state.page
