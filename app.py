@@ -1681,30 +1681,6 @@ def export_xlsx(e, info):
             for c in range(1,6): ws.cell(row=row,column=c).fill=BE; ws.cell(row=row,column=c).border=tb()
 
         if i < len(rows_right):
-            pair2   = rows_right[i]
-            d_item2 = pair2.get('debit_item')   # col 9 — DÉBIT journal
-            c_item2 = pair2.get('credit_item')  # col 10 — CRÉDIT journal
-            # Prendre la ligne principale pour date/libellé
-            main2    = d_item2 if d_item2 else c_item2
-            r2       = main2['row']; is_rep2 = main2['is_rep']
-            cp_fl    = RL if is_rep2 else OL
-            lb2      = r2['lib']
-            if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
-            cell(row,6,r2['date'],cp_fl,bold=is_rep2)
-            cell(row,7,lb2,cp_fl,bold=is_rep2)
-            cell(row,8,r2.get('piece',''),cp_fl,bold=is_rep2)
-            # col 9 = DÉBIT journal (suspens RB crédit → débit journal)
-            val_d9  = d_item2['row']['credit'] if d_item2 and d_item2['row']['credit'] > 0 else None
-            # col 10 = CRÉDIT journal (GL crédits reportés)
-            val_c10 = c_item2['row']['credit'] if c_item2 and c_item2['row']['credit'] > 0 else None
-            for col,val in [(9, val_d9),(10, val_c10)]:
-                ws.cell(row=row,column=col,value=val).fill=cp_fl
-                ws.cell(row=row,column=col).alignment=Alignment(horizontal='right')
-                ws.cell(row=row,column=col).font=Font(bold=is_rep2,size=10)
-        else:
-            for c in range(6,11): ws.cell(row=row,column=c).fill=OE; ws.cell(row=row,column=c).border=tb()
-
-        if i < len(rows_right):
             item2   = rows_right[i]
             r2      = item2['row']
             sign2   = item2['sign']    # +1 frais, -1 rejeté
