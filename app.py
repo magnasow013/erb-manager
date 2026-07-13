@@ -100,8 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = "https://VOTRE_PROJET.supabase.co"
-SUPABASE_KEY = "VOTRE_CLE_ANON_PUBLIQUE"
+SUPABASE_URL = ""
+SUPABASE_KEY = ""
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -1369,14 +1369,22 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     sum_gl_c_transit= susp_cp_credit_report_transit['credit'].sum() if not susp_cp_credit_report_transit.empty else 0.0
     sum_gl_debit    = susp_cp_debit['debit'].sum() if not susp_cp_debit.empty else 0.0
 
-    # ── Formules ────────────────────────────────────────────────────
-    # col D = GL courants + RB transit + GL report transit
-    sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit
-    # col J net = frais(+) − rejetés(−)
-    col_j_net = sum_rb_frais - sum_gl_c_rejete
+    # ── Règle unifiée frais bancaires ───────────────────────────────
+    # Chèques rejetés présents → frais en col J (convention Ecobank/TECHCONST)
+    # Pas de chèques rejetés   → frais en col D (convention CBAO/SAFRILOG classique)
+    has_rejete = not susp_cp_credit_report_rejete.empty
+
+    if has_rejete:
+        # Convention Ecobank : frais → col J positif
+        sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit
+        col_j_net = sum_rb_frais - sum_gl_c_rejete
+    else:
+        # Convention CBAO : frais → col D (comme chèques ordinaires)
+        sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit + sum_rb_frais
+        col_j_net = -sum_gl_c_rejete  # = 0 si pas de rejetés
 
     sr_rb = s_rb - sum_col_d + sum_gl_debit
-    sr_cp = s_cp - col_j_net   # = S_CP + rejetés − frais
+    sr_cp = s_cp - col_j_net   # = S_CP + rejetés − frais (Ecobank) ou S_CP (CBAO)
 
     # ── Présentation tableau ERB ─────────────────────────────────────
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
@@ -1442,28 +1450,31 @@ def build_erb_html(e, info):
     susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
     susp_rb_credit             = e.get('susp_rb_credit', pd.DataFrame())
 
+    has_rejete = not susp_cp_credit_report_rej.empty
+
     # ── COL D (gauche, débit relevé) ────────────────────────────────
     rows_left = []
-    # GL débits inversés → col E crédit relevé
     for _, r in susp_cp_debit.iterrows():
         rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
-    # RB débits transit (chèques en transit) → col D
     for _, r in susp_rb_debit_transit.iterrows():
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
-    # GL crédits courants (chèques émis) → col D
+    # Frais → col D si pas de rejetés (convention CBAO)
+    if not has_rejete:
+        for _, r in susp_rb_debit_frais.iterrows():
+            rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': False})
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
-    # GL crédits reportés transit (non rejetés) → col D
     for _, r in susp_cp_credit_report_tra.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': True})
 
     # ── COL J (droite, journal crédit ALGÉBRIQUE) ────────────────────
-    # Négatifs = chèques rejetés, Positifs = frais bancaires
     rows_right = []
     for _, r in susp_cp_credit_report_rej.iterrows():
         rows_right.append({'row': r, 'side': 'rejete', 'is_rep': True, 'sign': -1})
-    for _, r in susp_rb_debit_frais.iterrows():
-        rows_right.append({'row': r, 'side': 'frais',  'is_rep': False, 'sign': +1})
+    # Frais → col J seulement si rejetés présents (convention Ecobank)
+    if has_rejete:
+        for _, r in susp_rb_debit_frais.iterrows():
+            rows_right.append({'row': r, 'side': 'frais', 'is_rep': False, 'sign': +1})
 
     n_rows = max(len(rows_left), len(rows_right), 8)
     periode = info.get('pe','')
@@ -1593,10 +1604,15 @@ def export_xlsx(e, info):
     susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
 
     rows_left = []
+    has_rejete_xlsx = not susp_cp_credit_report_rej.empty
+
     for _, r in susp_cp_debit.iterrows():
         rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
     for _, r in susp_rb_debit_transit.iterrows():
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
+    if not has_rejete_xlsx:  # Convention CBAO : frais → col D
+        for _, r in susp_rb_debit_frais.iterrows():
+            rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': False})
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
     for _, r in susp_cp_credit_report_tra.iterrows():
@@ -1605,8 +1621,9 @@ def export_xlsx(e, info):
     rows_right = []
     for _, r in susp_cp_credit_report_rej.iterrows():
         rows_right.append({'row': r, 'sign': -1, 'is_rep': True})
-    for _, r in susp_rb_debit_frais.iterrows():
-        rows_right.append({'row': r, 'sign': +1, 'is_rep': False})
+    if has_rejete_xlsx:  # Convention Ecobank : frais → col J
+        for _, r in susp_rb_debit_frais.iterrows():
+            rows_right.append({'row': r, 'sign': +1, 'is_rep': False})
 
 
     n_rows = max(len(rows_left), len(rows_right), 8)
