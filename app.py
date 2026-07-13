@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ERB Manager — Rapprochement Bancaire  (Streamlit)
-#  v5.20 — Convention manuelle TECHCONST : col J algébrique (rejetés−, frais+)
+#  v5.21 — Annulations GL → col E crédit relevé (convention CBAO ELECNOR)
 # ═══════════════════════════════════════════════════════════════════════
 import sys, asyncio
 import random, time
@@ -100,8 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = ""
-SUPABASE_KEY = ""
+SUPABASE_URL = "https://VOTRE_PROJET.supabase.co"
+SUPABASE_KEY = "VOTRE_CLE_ANON_PUBLIQUE"
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -340,12 +340,12 @@ LICENCES = {
         "actif": True,
     },
     "ERB-1FF5-8FBA-FC26": {
-        "entreprise": "Client 4",
+        "entreprise": "MARIETA SOW",
         "domaines":   ["@gmail.com"],
         "actif": True,
     },
     "ERB-B987-B122-E9BE": {
-        "entreprise": "Client 5",
+        "entreprise": "MARIETA SOW",
         "domaines":   ["@gmail.com"],
         "actif": True,
     },
@@ -1014,6 +1014,22 @@ def _is_cheque_rejete(lib):
     l = str(lib).lower()
     return any(k in l for k in _REJETE_KEYWORDS)
 
+# ── Détection annulations GL (→ col E crédit relevé, pas col D) ───
+_ANNUL_KEYWORDS = [
+    'annul ','annulation','annulé','annulée','cancel','contrepassation',
+    'contre-passation','contre passation','retour chq','retour cheque',
+    'retour chèque','regularisation','régularisation compensation',
+]
+
+def _is_annulation_gl(lib):
+    """
+    Retourne True si le GL crédit est une annulation de chèque.
+    Ces GL vont en col E (crédit relevé) et NON en col D, 
+    en compensation des carries RB correspondants encore en col D.
+    """
+    l = str(lib).lower()
+    return any(k in l for k in _ANNUL_KEYWORDS)
+
 def _run_match(rb, cp, inversion):
     rb = rb.copy(); cp = cp.copy()
     rb['matched'] = False; rb['match_id'] = None
@@ -1361,10 +1377,21 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_credit_report_rejete  = pd.DataFrame()
         susp_cp_credit_report_transit = pd.DataFrame()
 
+    # GL crédits courants : séparer annulations (→ col E) des courants (→ col D)
+    if not susp_cp_credit_courant.empty:
+        mask_annul = susp_cp_credit_courant.apply(
+            lambda r: _is_annulation_gl(str(r.get('lib',''))), axis=1)
+        susp_cp_credit_courant_annul   = susp_cp_credit_courant[ mask_annul].reset_index(drop=True)
+        susp_cp_credit_courant_normal  = susp_cp_credit_courant[~mask_annul].reset_index(drop=True)
+    else:
+        susp_cp_credit_courant_annul  = pd.DataFrame()
+        susp_cp_credit_courant_normal = pd.DataFrame()
+
     # ── Sommes ──────────────────────────────────────────────────────
     sum_rb_frais    = susp_rb_debit_frais['debit'].sum()   if not susp_rb_debit_frais.empty   else 0.0
     sum_rb_transit  = susp_rb_debit_transit['debit'].sum() if not susp_rb_debit_transit.empty else 0.0
-    sum_gl_c_courant= susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
+    sum_gl_c_normal = susp_cp_credit_courant_normal['credit'].sum() if not susp_cp_credit_courant_normal.empty else 0.0
+    sum_gl_c_annul  = susp_cp_credit_courant_annul['credit'].sum()  if not susp_cp_credit_courant_annul.empty  else 0.0
     sum_gl_c_rejete = susp_cp_credit_report_rejete['credit'].sum()  if not susp_cp_credit_report_rejete.empty  else 0.0
     sum_gl_c_transit= susp_cp_credit_report_transit['credit'].sum() if not susp_cp_credit_report_transit.empty else 0.0
     sum_gl_debit    = susp_cp_debit['debit'].sum() if not susp_cp_debit.empty else 0.0
@@ -1376,15 +1403,18 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
 
     if has_rejete:
         # Convention Ecobank : frais → col J positif
-        sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit
+        sum_col_d = sum_gl_c_normal + sum_rb_transit + sum_gl_c_transit
         col_j_net = sum_rb_frais - sum_gl_c_rejete
     else:
         # Convention CBAO : frais → col D (comme chèques ordinaires)
-        sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit + sum_rb_frais
-        col_j_net = -sum_gl_c_rejete  # = 0 si pas de rejetés
+        sum_col_d = sum_gl_c_normal + sum_rb_transit + sum_gl_c_transit + sum_rb_frais
+        col_j_net = 0.0
 
-    sr_rb = s_rb - sum_col_d + sum_gl_debit
-    sr_cp = s_cp - col_j_net   # = S_CP + rejetés − frais (Ecobank) ou S_CP (CBAO)
+    # Annulations GL → col E crédit relevé (augmentent col_C, donc SR_RB)
+    sum_col_e_annul = sum_gl_c_annul  # s'ajoute au s_rb dans col_C
+
+    sr_rb = (s_rb + sum_col_e_annul) - sum_col_d + sum_gl_debit
+    sr_cp = s_cp - col_j_net
 
     # ── Présentation tableau ERB ─────────────────────────────────────
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
@@ -1393,7 +1423,7 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
 
     tot_d_rb = rb_sol_d + sum_col_d
-    tot_c_rb = rb_sol_c + sum_gl_debit
+    tot_c_rb = rb_sol_c + sum_col_e_annul + sum_gl_debit
     tot_d_cp = cp_sol_d
     tot_c_cp = col_j_net   # valeur algébrique (négatif si rejetés > frais)
 
@@ -1409,12 +1439,15 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_debit=susp_cp_debit,
         susp_cp_credit=susp_cp_credit,
         susp_cp_credit_courant=susp_cp_credit_courant,
+        susp_cp_credit_courant_normal=susp_cp_credit_courant_normal,
+        susp_cp_credit_courant_annul=susp_cp_credit_courant_annul,
         susp_cp_credit_report=susp_cp_credit_report,
         susp_cp_credit_report_rejete=susp_cp_credit_report_rejete,
         susp_cp_credit_report_transit=susp_cp_credit_report_transit,
         rb_sol_d=rb_sol_d, rb_sol_c=rb_sol_c,
         cp_sol_d=cp_sol_d, cp_sol_c=cp_sol_c,
         sum_col_d=sum_col_d, col_j_net=col_j_net,
+        sum_col_e_annul=sum_col_e_annul,
         sum_gl_debit=sum_gl_debit,
         tot_d_rb=tot_d_rb, tot_c_rb=tot_c_rb, sr_rb=sr_rb,
         tot_d_cp=tot_d_cp, tot_c_cp=tot_c_cp, sr_cp=sr_cp,
@@ -1423,7 +1456,7 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_credit_report_nonrejete=susp_cp_credit_report_transit,
         cp_susp_d_rb=0.0,
         sum_susp_rb_d=sum_rb_transit,
-        sum_susp_gl_c_courant=sum_gl_c_courant,
+        sum_susp_gl_c_courant=sum_gl_c_normal,
         sum_susp_gl_c_report=sum_gl_c_rejete,
         sum_susp_gl_d=sum_gl_debit,
     )
@@ -1442,28 +1475,35 @@ def build_erb_html(e, info):
       • Chèques rejetés reportés → valeur NÉGATIVE (rouge)
       • Frais bancaires RB non saisis → valeur POSITIVE (orange)
     """
-    susp_cp_debit              = e.get('susp_cp_debit', pd.DataFrame())
-    susp_cp_credit_courant     = e.get('susp_cp_credit_courant', pd.DataFrame())
-    susp_cp_credit_report_rej  = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
-    susp_cp_credit_report_tra  = e.get('susp_cp_credit_report_transit', pd.DataFrame())
-    susp_rb_debit_transit      = e.get('susp_rb_debit_transit', pd.DataFrame())
-    susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
-    susp_rb_credit             = e.get('susp_rb_credit', pd.DataFrame())
+    susp_cp_debit                  = e.get('susp_cp_debit', pd.DataFrame())
+    susp_cp_credit_courant_normal  = e.get('susp_cp_credit_courant_normal', pd.DataFrame())
+    susp_cp_credit_courant_annul   = e.get('susp_cp_credit_courant_annul', pd.DataFrame())
+    susp_cp_credit_report_rej      = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
+    susp_cp_credit_report_tra      = e.get('susp_cp_credit_report_transit', pd.DataFrame())
+    susp_rb_debit_transit          = e.get('susp_rb_debit_transit', pd.DataFrame())
+    susp_rb_debit_frais            = e.get('susp_rb_debit_frais', pd.DataFrame())
 
     has_rejete = not susp_cp_credit_report_rej.empty
 
-    # ── COL D (gauche, débit relevé) ────────────────────────────────
+    # ── COL D/E (gauche) ────────────────────────────────────────────
     rows_left = []
+    # GL débits → col E (crédit relevé)
     for _, r in susp_cp_debit.iterrows():
         rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
+    # Annulations GL → col E (crédit relevé, compensent carries en col D)
+    for _, r in susp_cp_credit_courant_annul.iterrows():
+        rows_left.append({'row': r, 'side': 'gl_annul', 'is_rep': False})
+    # RB débits transit → col D
     for _, r in susp_rb_debit_transit.iterrows():
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
     # Frais → col D si pas de rejetés (convention CBAO)
     if not has_rejete:
         for _, r in susp_rb_debit_frais.iterrows():
             rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': False})
-    for _, r in susp_cp_credit_courant.iterrows():
+    # GL crédits courants normaux → col D
+    for _, r in susp_cp_credit_courant_normal.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
+    # GL crédits reportés transit → col D
     for _, r in susp_cp_credit_report_tra.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': True})
 
@@ -1471,7 +1511,6 @@ def build_erb_html(e, info):
     rows_right = []
     for _, r in susp_cp_credit_report_rej.iterrows():
         rows_right.append({'row': r, 'side': 'rejete', 'is_rep': True, 'sign': -1})
-    # Frais → col J seulement si rejetés présents (convention Ecobank)
     if has_rejete:
         for _, r in susp_rb_debit_frais.iterrows():
             rows_right.append({'row': r, 'side': 'frais', 'is_rep': False, 'sign': +1})
@@ -1529,13 +1568,16 @@ def build_erb_html(e, info):
             s_tx = S['RR'] if is_rep else S['RB']
             s_num = S['RRR'] if is_rep else S['RBR']
             if side == 'gl_debit':
-                # GL debit → col E (credit releve, inversi)
+                # GL débit → col E (crédit relevé)
                 d_val = ''; c_val = fmt_fr(r['debit']) if r['debit'] > 0 else ''
+            elif side == 'gl_annul':
+                # Annulation GL → col E (crédit relevé, compense carry en col D)
+                d_val = ''; c_val = fmt_fr(r['credit']) if r['credit'] > 0 else ''
             elif side == 'rb_debit':
-                # RB debit → col D
+                # RB débit → col D
                 d_val = fmt_fr(r['debit']) if r['debit'] > 0 else ''; c_val = ''
             else:  # gl_credit_courant
-                # GL credit courant → col D (debit releve, inverse)
+                # GL crédit courant → col D (débit relevé, inversé)
                 d_val = fmt_fr(r['credit']) if r['credit'] > 0 else ''; c_val = ''
             h += (f'<tr><td style="{s_tx}">{r["date"]}</td><td style="{s_tx}">{lb}</td>'
                   f'<td style="{s_tx}">{r.get("piece","")}</td>'
@@ -1596,24 +1638,27 @@ def build_erb_html(e, info):
     return h
 
 def export_xlsx(e, info):
-    susp_cp_debit              = e.get('susp_cp_debit', pd.DataFrame())
-    susp_cp_credit_courant     = e.get('susp_cp_credit_courant', pd.DataFrame())
-    susp_cp_credit_report_rej  = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
-    susp_cp_credit_report_tra  = e.get('susp_cp_credit_report_transit', pd.DataFrame())
-    susp_rb_debit_transit      = e.get('susp_rb_debit_transit', pd.DataFrame())
-    susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
+    susp_cp_debit                  = e.get('susp_cp_debit', pd.DataFrame())
+    susp_cp_credit_courant_normal  = e.get('susp_cp_credit_courant_normal', pd.DataFrame())
+    susp_cp_credit_courant_annul   = e.get('susp_cp_credit_courant_annul', pd.DataFrame())
+    susp_cp_credit_report_rej      = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
+    susp_cp_credit_report_tra      = e.get('susp_cp_credit_report_transit', pd.DataFrame())
+    susp_rb_debit_transit          = e.get('susp_rb_debit_transit', pd.DataFrame())
+    susp_rb_debit_frais            = e.get('susp_rb_debit_frais', pd.DataFrame())
 
     rows_left = []
     has_rejete_xlsx = not susp_cp_credit_report_rej.empty
 
     for _, r in susp_cp_debit.iterrows():
-        rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
+        rows_left.append({'row': r, 'side': 'gl_debit',  'is_rep': _is_report(r.to_dict())})
+    for _, r in susp_cp_credit_courant_annul.iterrows():
+        rows_left.append({'row': r, 'side': 'gl_annul',  'is_rep': False})
     for _, r in susp_rb_debit_transit.iterrows():
-        rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
-    if not has_rejete_xlsx:  # Convention CBAO : frais → col D
+        rows_left.append({'row': r, 'side': 'rb_debit',  'is_rep': _is_report(r.to_dict())})
+    if not has_rejete_xlsx:
         for _, r in susp_rb_debit_frais.iterrows():
-            rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': False})
-    for _, r in susp_cp_credit_courant.iterrows():
+            rows_left.append({'row': r, 'side': 'rb_debit',  'is_rep': False})
+    for _, r in susp_cp_credit_courant_normal.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
     for _, r in susp_cp_credit_report_tra.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': True})
@@ -1621,7 +1666,7 @@ def export_xlsx(e, info):
     rows_right = []
     for _, r in susp_cp_credit_report_rej.iterrows():
         rows_right.append({'row': r, 'sign': -1, 'is_rep': True})
-    if has_rejete_xlsx:  # Convention Ecobank : frais → col J
+    if has_rejete_xlsx:
         for _, r in susp_rb_debit_frais.iterrows():
             rows_right.append({'row': r, 'sign': +1, 'is_rep': False})
 
@@ -1684,6 +1729,9 @@ def export_xlsx(e, info):
             if is_rep: lb = f'[↩ {r.get("carry_from","")}] {lb}'
             if side == 'gl_debit':
                 rb_d = None; rb_c = r['debit'] if r['debit'] > 0 else None
+            elif side == 'gl_annul':
+                # Annulation GL → col E (crédit relevé)
+                rb_d = None; rb_c = r['credit'] if r['credit'] > 0 else None
             elif side == 'rb_debit':
                 rb_d = r['debit'] if r['debit'] > 0 else None; rb_c = None
             else:  # gl_credit_courant
@@ -2154,7 +2202,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.20")
+    st.caption("ERB v5.21")
 
 # ═══ ROUTING ══════════════════════════════════════════════════════════
 page=st.session_state.page
