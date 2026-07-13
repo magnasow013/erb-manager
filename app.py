@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ERB Manager — Rapprochement Bancaire  (Streamlit)
-#  v5.19 — Détection frais bancaires + saisie GL inline + passe 1b filtrée
+#  v5.20 — Convention manuelle TECHCONST : col J algébrique (rejetés−, frais+)
 # ═══════════════════════════════════════════════════════════════════════
 import sys, asyncio
 import random, time
@@ -100,8 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = ""
-SUPABASE_KEY = ""
+SUPABASE_URL = "https://VOTRE_PROJET.supabase.co"
+SUPABASE_KEY = "VOTRE_CLE_ANON_PUBLIQUE"
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -1002,6 +1002,18 @@ def lib_similarity(a, b):
         else: return 0.0
     return min(1.0, base + len(long_common)*0.1)
 
+# ── Détection chèques rejetés (carries GL crédit → col J NÉGATIF) ──
+_REJETE_KEYWORDS = [
+    'cheque rejete','chèque rejeté','rejet cheque','rejet chèque',
+    'cheque impaye','chèque impayé','impaye','rejet cb','retour cheque',
+    'cheque retourne','rejet prelevement','impayé','cheq rejete',
+]
+
+def _is_cheque_rejete(lib):
+    """Retourne True si le libellé correspond à un chèque rejeté/impayé."""
+    l = str(lib).lower()
+    return any(k in l for k in _REJETE_KEYWORDS)
+
 def _run_match(rb, cp, inversion):
     rb = rb.copy(); cp = cp.copy()
     rb['matched'] = False; rb['match_id'] = None
@@ -1291,31 +1303,46 @@ def cloturer_mois(periode, rb_df, cp_df, erb_html_str=''):
 # ───────────────────────────────────────────────────────────────────────
 def calc_erb(rb_df, cp_df, s_rb, s_cp):
     """
-    Convention ERB Ecobank — logique validée sur ERB de reference :
+    Convention ERB — règle manuelle TECHCONST/Ecobank validée.
 
-    COTE RELEVE col D = suspens RB debits (reports rouges + courants)
-                      + suspens GL credits COURANTS inversés (cheques emis sans compensation)
-    COTE RELEVE col E = solde RB crediteur
-                      + suspens GL debits courants inversés (GL debit sans RB credit)
-    SR_RB = col E - col D
+    ═══════════════════════════════════════════════════════════════
+    COL D (relevé, débit) :
+      • Chèques GL courants non compensés au relevé  (susp_gl_c_courant)
+      • Carries RB débit en transit                  (susp_rb_debit NON frais)
+      • Carries GL crédit en transit (non rejetés)   (susp_gl_c_report NON rejeté)
+      SR_RB = S_RB − Σ col_D
 
-    COTE JOURNAL col I = solde GL debiteur
-    COTE JOURNAL col J = suspens GL credits REPORTÉS (cheques rejetes, valeur abs)
-                       + suspens RB credits courants
-    SR_CP = col I - col J  =>  solde GL + |cheques rejetes|
+    COL J (journal, valeur ALGÉBRIQUE) :
+      • Chèques rejetés reportés      → NÉGATIF   (−)
+      • Frais bancaires RB non saisis → POSITIF   (+)
+      SR_CP = S_CP − col_J_net
+              = S_CP − (Σfrais+ − Σrejetés−)
+              = S_CP + Σrejetés − Σfrais
 
-    Equilibre : SR_RB = SR_CP  =>  chk = SR_RB - SR_CP ~ 0
-    Distinction courant/reporté : _is_report(r) via carry_from non vide
+    IDENTITÉ : SR_RB = SR_CP  ⟺  S_RB − S_CP = col_D − col_J_net
+    ═══════════════════════════════════════════════════════════════
     """
     susp_rb = rb_df[~rb_df['matched']].reset_index(drop=True) if rb_df is not None and len(rb_df) else pd.DataFrame()
     susp_cp = cp_df[~cp_df['matched']].reset_index(drop=True) if cp_df is not None and len(cp_df) else pd.DataFrame()
 
+    # ── Suspens RB ──────────────────────────────────────────────────
     susp_rb_debit  = susp_rb[(susp_rb['debit']>0)&(susp_rb['credit']==0)].reset_index(drop=True) if not susp_rb.empty else pd.DataFrame()
     susp_rb_credit = susp_rb[(susp_rb['credit']>0)&(susp_rb['debit']==0)].reset_index(drop=True) if not susp_rb.empty else pd.DataFrame()
+
+    # Séparer frais bancaires (→ col J +) vs chèques transit (→ col D)
+    if not susp_rb_debit.empty:
+        mask_frais = susp_rb_debit.apply(lambda r: _is_frais_bancaire(str(r.get('lib',''))), axis=1)
+        susp_rb_debit_frais   = susp_rb_debit[ mask_frais].reset_index(drop=True)
+        susp_rb_debit_transit = susp_rb_debit[~mask_frais].reset_index(drop=True)
+    else:
+        susp_rb_debit_frais   = pd.DataFrame()
+        susp_rb_debit_transit = pd.DataFrame()
+
+    # ── Suspens GL ──────────────────────────────────────────────────
     susp_cp_debit  = susp_cp[(susp_cp['debit']>0)&(susp_cp['credit']==0)].reset_index(drop=True) if not susp_cp.empty else pd.DataFrame()
     susp_cp_credit = susp_cp[(susp_cp['credit']>0)&(susp_cp['debit']==0)].reset_index(drop=True) if not susp_cp.empty else pd.DataFrame()
 
-    # Distinguer GL credits courants (cheques emis) vs reportes (cheques rejetes)
+    # GL crédits : courants vs reportés
     if not susp_cp_credit.empty:
         mask_rep = susp_cp_credit.apply(lambda r: _is_report(r.to_dict()), axis=1)
         susp_cp_credit_courant = susp_cp_credit[~mask_rep].reset_index(drop=True)
@@ -1324,158 +1351,123 @@ def calc_erb(rb_df, cp_df, s_rb, s_cp):
         susp_cp_credit_courant = pd.DataFrame()
         susp_cp_credit_report  = pd.DataFrame()
 
-    # ═══════════════════════════════════════════════════════════════════
-    # CONVENTION ERB ECOBANK — FORMULES MATHÉMATIQUEMENT EXACTES
-    # ───────────────────────────────────────────────────────────────────
-    # Identité Ecobank : S_RB = S_CP + ΣRB_D + ΣGL_C
-    #
-    # CÔTÉ RELEVÉ :
-    #   col D = ΣRB_D  (suspens DÉBIT relevé : chèques tirés non encore compensés)
-    #   col E = S_RB   (solde final relevé)
-    #   SR_RB = col E - col D = S_RB - ΣRB_D
-    #
-    # CÔTÉ JOURNAL :
-    #   col I = S_CP   (solde final GL)
-    #   col J = ΣGL_C  (suspens CRÉDIT GL : chèques rejetés, affiché négatif)
-    #   SR_CP = col I + col J = S_CP + ΣGL_C
-    #
-    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C
-    #
-    # ΣRB_D = suspens relevé DÉBIT  (all : courants + reportés)
-    # ΣRB_C = suspens relevé CRÉDIT (versements relevé sans GL — non inclus dans SR)
-    # ΣGL_C = suspens GL CRÉDIT     (chèques rejetés, courants + reportés)
-    # ΣGL_D = suspens GL DÉBIT      (encaissements GL sans relevé — non inclus dans SR)
-    # ═══════════════════════════════════════════════════════════════════
+    # GL crédits reportés : rejetés (→ col J −) vs transit (→ col D)
+    if not susp_cp_credit_report.empty:
+        mask_rej = susp_cp_credit_report.apply(
+            lambda r: _is_cheque_rejete(str(r.get('lib',''))), axis=1)
+        susp_cp_credit_report_rejete  = susp_cp_credit_report[ mask_rej].reset_index(drop=True)
+        susp_cp_credit_report_transit = susp_cp_credit_report[~mask_rej].reset_index(drop=True)
+    else:
+        susp_cp_credit_report_rejete  = pd.DataFrame()
+        susp_cp_credit_report_transit = pd.DataFrame()
 
-    # Calcul des sommes de suspens
-    sum_susp_rb_d = susp_rb_debit['debit'].sum()            if not susp_rb_debit.empty          else 0.0
-    sum_susp_rb_c = susp_rb_credit['credit'].sum()          if not susp_rb_credit.empty         else 0.0
-    sum_susp_gl_d = susp_cp_debit['debit'].sum()            if not susp_cp_debit.empty          else 0.0
-    sum_susp_gl_c = (susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0) +                     (susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0)
+    # ── Sommes ──────────────────────────────────────────────────────
+    sum_rb_frais    = susp_rb_debit_frais['debit'].sum()   if not susp_rb_debit_frais.empty   else 0.0
+    sum_rb_transit  = susp_rb_debit_transit['debit'].sum() if not susp_rb_debit_transit.empty else 0.0
+    sum_gl_c_courant= susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
+    sum_gl_c_rejete = susp_cp_credit_report_rejete['credit'].sum()  if not susp_cp_credit_report_rejete.empty  else 0.0
+    sum_gl_c_transit= susp_cp_credit_report_transit['credit'].sum() if not susp_cp_credit_report_transit.empty else 0.0
+    sum_gl_debit    = susp_cp_debit['debit'].sum() if not susp_cp_debit.empty else 0.0
 
-    # ═══════════════════════════════════════════════════════════════════
-    # CONVENTION ERB ECOBANK — FORMULES EXACTES (validées sur ERB manuel)
-    # ───────────────────────────────────────────────────────────────────
-    # Identité : S_RB = S_CP + ΣRB_D + ΣGL_C_courant + ΣGL_C_reporté
-    #
-    # Col D (côté relevé) = ΣRB_D + ΣGL_C_courant
-    #   (suspens DÉBIT relevé + chèques émis GL non compensés au relevé)
-    # Col E (côté relevé) = S_RB
-    #   SR_RB = S_RB - ΣRB_D - ΣGL_C_courant
-    #
-    # Col I (côté journal) = S_CP
-    # Col J (côté journal) = ΣGL_C_reporté  (chèques rejetés reportés, affiché négatif)
-    #   SR_CP = S_CP + ΣGL_C_reporté
-    #
-    # SR_RB = SR_CP toujours si S_RB = S_CP + ΣRB_D + ΣGL_C (toutes ΣGL_C)
-    # ═══════════════════════════════════════════════════════════════════
+    # ── Formules ────────────────────────────────────────────────────
+    # col D = GL courants + RB transit + GL report transit
+    sum_col_d = sum_gl_c_courant + sum_rb_transit + sum_gl_c_transit
+    # col J net = frais(+) − rejetés(−)
+    col_j_net = sum_rb_frais - sum_gl_c_rejete
 
-    sum_susp_gl_c_courant = susp_cp_credit_courant['credit'].sum() if not susp_cp_credit_courant.empty else 0.0
-    sum_susp_gl_c_report  = susp_cp_credit_report['credit'].sum()  if not susp_cp_credit_report.empty  else 0.0
+    sr_rb = s_rb - sum_col_d + sum_gl_debit
+    sr_cp = s_cp - col_j_net   # = S_CP + rejetés − frais
 
-    # ═══════════════════════════════════════════════════════════════════
-    # CONVENTION ERB ECOBANK — VALIDÉE SUR ERB MANUEL MARS 2026
-    # ───────────────────────────────────────────────────────────────────
-    # CÔTÉ RELEVÉ :
-    #   col D = ΣRB_D + ΣGL_C_courant   (suspens débit + chèques GL non compensés)
-    #   col E = S_RB
-    #   SR_RB = S_RB - ΣRB_D - ΣGL_C_courant
-    #
-    # CÔTÉ JOURNAL :
-    #   col I = S_CP  (SEULEMENT le solde GL — rien d'autre)
-    #   col J = -ΣGL_C_reporté  (chèques rejetés, affiché NÉGATIF dans Excel)
-    #   SR_CP = S_CP + ΣGL_C_reporté
-    #
-    # RÈGLES IMPORTANTES :
-    #   • Les suspens RB CRÉDIT (versements) N'APPARAISSENT PAS dans le tableau ERB
-    #   • Ils ne rentrent ni en col I ni en col J ni en col D
-    #   • L'ERB précédent sert uniquement à identifier les suspens à régulariser
-    #     et n'impose pas de solde de départ
-    # ═══════════════════════════════════════════════════════════════════
-
-    # Soldes rapprochés — convention Ecobank exacte
-    # SR_RB = S_RB + ΣGL_D - ΣRB_D - ΣGL_C_courant
-    #   ΣGL_D = encaissements GL sans relevé → col E crédit → augmentent SR_RB
-    # SR_CP = S_CP + ΣGL_C_report
-    # Identité : SR_RB = SR_CP si S_RB = S_CP + ΣRB_D + ΣGL_C - ΣGL_D
-    sr_rb = s_rb + sum_susp_gl_d - sum_susp_rb_d - sum_susp_gl_c_courant
-    sr_cp = s_cp + sum_susp_gl_c_report
-
-    # Variables de présentation tableau ERB
+    # ── Présentation tableau ERB ─────────────────────────────────────
     rb_sol_d = abs(s_rb) if s_rb < 0 else 0.0
     rb_sol_c = s_rb      if s_rb >= 0 else 0.0
     cp_sol_d = s_cp      if s_cp >= 0 else 0.0
     cp_sol_c = abs(s_cp) if s_cp <  0 else 0.0
-    cp_susp_d_rb     = 0.0   # suspens RB crédits N'ENTRENT PAS dans le tableau ERB
-    cp_susp_c_report = sum_susp_gl_c_report
 
-    # Totaux pour affichage tableau ERB
-    rb_susp_d_rb         = sum_susp_rb_d
-    rb_susp_d_gl_courant = sum_susp_gl_c_courant
-    rb_susp_c_gl_debit   = sum_susp_gl_d
-    tot_d_rb = rb_sol_d + rb_susp_d_rb + rb_susp_d_gl_courant
-    tot_c_rb = rb_sol_c + rb_susp_c_gl_debit
-    tot_d_cp = cp_sol_d          # col I = S_CP seulement
-    tot_c_cp = cp_susp_c_report  # col J = ΣGL_C reportés (valeur positive, affiché négatif)
+    tot_d_rb = rb_sol_d + sum_col_d
+    tot_c_rb = rb_sol_c + sum_gl_debit
+    tot_d_cp = cp_sol_d
+    tot_c_cp = col_j_net   # valeur algébrique (négatif si rejetés > frais)
 
-    chk = sr_rb - sr_cp; ok = abs(chk) < 0.5
+    chk = sr_rb - sr_cp
+    ok  = abs(chk) < 0.5
+
     return dict(
         susp_rb=susp_rb, susp_cp=susp_cp,
-        susp_rb_debit=susp_rb_debit, susp_rb_credit=susp_rb_credit,
-        susp_cp_debit=susp_cp_debit, susp_cp_credit=susp_cp_credit,
+        susp_rb_debit=susp_rb_debit,
+        susp_rb_debit_frais=susp_rb_debit_frais,
+        susp_rb_debit_transit=susp_rb_debit_transit,
+        susp_rb_credit=susp_rb_credit,
+        susp_cp_debit=susp_cp_debit,
+        susp_cp_credit=susp_cp_credit,
         susp_cp_credit_courant=susp_cp_credit_courant,
         susp_cp_credit_report=susp_cp_credit_report,
-        rb_sol_d=rb_sol_d, rb_sol_c=rb_sol_c, cp_sol_d=cp_sol_d, cp_sol_c=cp_sol_c,
+        susp_cp_credit_report_rejete=susp_cp_credit_report_rejete,
+        susp_cp_credit_report_transit=susp_cp_credit_report_transit,
+        rb_sol_d=rb_sol_d, rb_sol_c=rb_sol_c,
+        cp_sol_d=cp_sol_d, cp_sol_c=cp_sol_c,
+        sum_col_d=sum_col_d, col_j_net=col_j_net,
+        sum_gl_debit=sum_gl_debit,
         tot_d_rb=tot_d_rb, tot_c_rb=tot_c_rb, sr_rb=sr_rb,
-        tot_d_cp=tot_d_cp, tot_c_cp=tot_c_cp, sr_cp=sr_cp, chk=chk, ok=ok,
-        cp_susp_d_rb=cp_susp_d_rb,
+        tot_d_cp=tot_d_cp, tot_c_cp=tot_c_cp, sr_cp=sr_cp,
+        chk=chk, ok=ok,
+        # Rétro-compatibilité
+        susp_cp_credit_report_nonrejete=susp_cp_credit_report_transit,
+        cp_susp_d_rb=0.0,
+        sum_susp_rb_d=sum_rb_transit,
+        sum_susp_gl_c_courant=sum_gl_c_courant,
+        sum_susp_gl_c_report=sum_gl_c_rejete,
+        sum_susp_gl_d=sum_gl_debit,
     )
+
 
 def build_erb_html(e, info):
     """
-    COTE RELEVE :
-      rows_left = GL debits (inverses, col E) + RB debits + GL credits COURANTS (col D)
-    COTE JOURNAL :
-      rows_right = GL credits REPORTES (cheques rejetes, col J) + RB credits
-    """
-    susp_cp_debit          = e.get('susp_cp_debit', pd.DataFrame())
-    susp_cp_credit_courant = e.get('susp_cp_credit_courant', pd.DataFrame())
-    susp_cp_credit_report  = e.get('susp_cp_credit_report', pd.DataFrame())
-    susp_rb_debit  = e['susp_rb_debit']
-    susp_rb_credit = e['susp_rb_credit']
+    CONVENTION MANUELLE TECHCONST :
 
-    # COTE RELEVE col D : RB debits (reports rouges en premier) + GL credits courants inverses
-    # COTE RELEVE col E : GL debits inverses en credit
+    COL D (relevé débit) :
+      • GL crédits courants (chèques émis non compensés)
+      • RB débits TRANSIT (carries + courants non-frais)
+      • GL crédits reportés NON rejetés (transit d'un mois précédent)
+
+    COL J (journal crédit, ALGÉBRIQUE) :
+      • Chèques rejetés reportés → valeur NÉGATIVE (rouge)
+      • Frais bancaires RB non saisis → valeur POSITIVE (orange)
+    """
+    susp_cp_debit              = e.get('susp_cp_debit', pd.DataFrame())
+    susp_cp_credit_courant     = e.get('susp_cp_credit_courant', pd.DataFrame())
+    susp_cp_credit_report_rej  = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
+    susp_cp_credit_report_tra  = e.get('susp_cp_credit_report_transit', pd.DataFrame())
+    susp_rb_debit_transit      = e.get('susp_rb_debit_transit', pd.DataFrame())
+    susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
+    susp_rb_credit             = e.get('susp_rb_credit', pd.DataFrame())
+
+    # ── COL D (gauche, débit relevé) ────────────────────────────────
     rows_left = []
-    # GL debits → col E (credit releve) — affiches en bleu clair, valeur en CREDIT
+    # GL débits inversés → col E crédit relevé
     for _, r in susp_cp_debit.iterrows():
         rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
-    # RB debits → col D (debit releve)
-    for _, r in susp_rb_debit.iterrows():
+    # RB débits transit (chèques en transit) → col D
+    for _, r in susp_rb_debit_transit.iterrows():
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
-    # GL credits courants → col D (debit releve, inverses)
+    # GL crédits courants (chèques émis) → col D
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
+    # GL crédits reportés transit (non rejetés) → col D
+    for _, r in susp_cp_credit_report_tra.iterrows():
+        rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': True})
 
-    # COTE JOURNAL :
-    # col I (DÉBIT)  : S_CP seulement (affiché dans la ligne solde)
-    # col J (CRÉDIT) : GL crédits REPORTÉS seulement (chèques rejetés, valeur NÉGATIVE)
-    # Les suspens RB CRÉDIT (versements) N'APPARAISSENT PAS dans le tableau ERB
-    rows_right_debit  = []  # col I — vide (S_CP affiché dans ligne solde uniquement)
-    rows_right_credit = []  # col J — CRÉDIT journal (GL reportés uniquement)
-    # GL crédits reportés → CRÉDIT journal (col J), valeur négative
-    for _, r in susp_cp_credit_report.iterrows():
-        rows_right_credit.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
-    # Fusionner pour l'affichage ligne par ligne
+    # ── COL J (droite, journal crédit ALGÉBRIQUE) ────────────────────
+    # Négatifs = chèques rejetés, Positifs = frais bancaires
     rows_right = []
-    max_right = max(len(rows_right_debit), len(rows_right_credit))
-    for i in range(max_right):
-        d_item = rows_right_debit[i]  if i < len(rows_right_debit)  else None
-        c_item = rows_right_credit[i] if i < len(rows_right_credit) else None
-        rows_right.append({'debit_item': d_item, 'credit_item': c_item})
+    for _, r in susp_cp_credit_report_rej.iterrows():
+        rows_right.append({'row': r, 'side': 'rejete', 'is_rep': True, 'sign': -1})
+    for _, r in susp_rb_debit_frais.iterrows():
+        rows_right.append({'row': r, 'side': 'frais',  'is_rep': False, 'sign': +1})
 
     n_rows = max(len(rows_left), len(rows_right), 8)
     periode = info.get('pe','')
+
 
     S = dict(
         TH  = 'background:#4472C4;color:#fff;font-weight:700;padding:6px 8px;border:1px solid #2E5A9C;text-align:center;font-size:11px;white-space:nowrap',
@@ -1541,53 +1533,46 @@ def build_erb_html(e, info):
             h += (f'<tr><td style="{S["ER"]}"></td><td style="{S["ER"]}"></td>'
                   f'<td style="{S["ER"]}"></td><td style="{S["ER"]}"></td><td style="{S["ER"]}"></td>')
 
-        # ── COTE JOURNAL ─────────────────────────────────────────────
+
+        # ── COTE JOURNAL (col J algébrique) ──────────────────────────
         if i < len(rows_right):
-            pair = rows_right[i]
-            d_item = pair.get('debit_item')   # col I — DÉBIT
-            c_item = pair.get('credit_item')  # col J — CRÉDIT
-            if d_item:
-                r2 = d_item['row']; is_rep2 = d_item['is_rep']
-                lb2 = r2['lib']
-                if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
-                s_tx2 = S['RR'] if is_rep2 else S['CP']
-                s_num2 = S['RRR'] if is_rep2 else S['CPR']
-                # RB crédit → DÉBIT journal (col I) — montant en débit
-                d2 = fmt_fr(r2['credit']) if r2['credit'] > 0 else ''
-                c2 = fmt_fr(c_item['row']['credit']) if c_item and c_item['row']['credit'] > 0 else ''
-                lb_c = ''
-                if c_item:
-                    lb_c_r = c_item['row']['lib']
-                    if c_item['is_rep']: lb_c_r = f'[↩ {c_item["row"].get("carry_from","")}] {lb_c_r}'
-                h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
-                      f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
-                      f'<td style="{s_num2}">{d2}</td><td style="{s_num2}">{c2}</td></tr>')
-            elif c_item:
-                r2 = c_item['row']; is_rep2 = c_item['is_rep']
-                lb2 = r2['lib']
-                if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
-                s_tx2 = S['RR'] if is_rep2 else S['CP']
-                s_num2 = S['RRR'] if is_rep2 else S['CPR']
-                c2 = fmt_fr(r2['credit']) if r2['credit'] > 0 else ''
-                h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
-                      f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
-                      f'<td style="{s_num2}"></td><td style="{s_num2}">{c2}</td></tr>')
+            item2 = rows_right[i]
+            r2      = item2['row']
+            side2   = item2['side']
+            is_rep2 = item2['is_rep']
+            sign2   = item2['sign']   # +1 frais, -1 rejeté
+            lb2 = r2['lib']
+            if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
+            # Rejetés → rouge, Frais → orange sombre
+            if sign2 < 0:
+                s_tx2  = S['RR'];  s_num2 = S['RRR']
             else:
-                h += (f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td>'
-                      f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td><td style="{S["EC"]}"></td></tr>')
+                s_tx2  = S['CP'];  s_num2 = S['CPR']
+            # Montant brut puis signe
+            montant_brut = r2['credit'] if r2['credit'] > 0 else r2['debit']
+            val_affiche  = f"-{fmt_fr(montant_brut)}" if sign2 < 0 else fmt_fr(montant_brut)
+            h += (f'<td style="{s_tx2}">{r2["date"]}</td><td style="{s_tx2}">{lb2}</td>'
+                  f'<td style="{s_tx2}">{r2.get("piece","")}</td>'
+                  f'<td style="{s_num2}"></td><td style="{s_num2}">{val_affiche}</td></tr>')
         else:
             h += (f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td>'
                   f'<td style="{S["EC"]}"></td><td style="{S["EC"]}"></td><td style="{S["EC"]}"></td></tr>')
 
+    # ── Totaux ───────────────────────────────────────────────────────
+    col_j_net = e.get('col_j_net', 0.0)
+    col_j_str = (f"-{fmt_fr(abs(col_j_net))}" if col_j_net < 0
+                 else (fmt_fr(col_j_net) if col_j_net > 0 else '-'))
     h += (f'<tr><td colspan="3" style="{S["FTL"]}">TOTAUX</td>'
           f'<td style="{S["FT"]}">{fmt_fr(e["tot_d_rb"]) or "0,00"}</td>'
           f'<td style="{S["FT"]}">{fmt_fr(e["tot_c_rb"]) or "0,00"}</td>'
           f'<td colspan="3" style="{S["FTL"]}">TOTAUX</td>'
           f'<td style="{S["FT"]}">{fmt_fr(e["tot_d_cp"]) or "0,00"}</td>'
-          f'<td style="{S["FT"]}">{fmt_fr(e["tot_c_cp"]) if e["tot_c_cp"] else "-"}</td></tr>')
+          f'<td style="{S["FT"]}">{col_j_str}</td></tr>')
 
+    # SR côté relevé en DÉBIT (valeur négative conventionnelle)
+    sr_rb_val = f"-{fmt_fr(e['sr_rb'])}" if e['sr_rb'] >= 0 else fmt_fr(abs(e['sr_rb']))
     h += (f'<tr><td style="{S["SR"]}"></td><td colspan="2" style="{S["SRL"]}">SOLDES RAPPROCHES</td>'
-          f'<td style="{S["SR"]}"><b>{fmt_fr(e["sr_rb"])}</b></td><td style="{S["SR"]}"></td>'
+          f'<td style="{S["SR"]}"><b>{sr_rb_val}</b></td><td style="{S["SR"]}"></td>'
           f'<td style="{S["SR"]}"></td><td colspan="2" style="{S["SRL"]}">SOLDES RAPPROCHES</td>'
           f'<td style="{S["SR"]}"></td><td style="{S["SR"]}"><b>{fmt_fr(e["sr_cp"])}</b></td></tr>')
 
@@ -1600,33 +1585,29 @@ def build_erb_html(e, info):
     return h
 
 def export_xlsx(e, info):
-    susp_cp_debit          = e.get('susp_cp_debit', pd.DataFrame())
-    susp_cp_credit_courant = e.get('susp_cp_credit_courant', pd.DataFrame())
-    susp_cp_credit_report  = e.get('susp_cp_credit_report', pd.DataFrame())
-    susp_rb_debit  = e['susp_rb_debit']
-    susp_rb_credit = e['susp_rb_credit']
+    susp_cp_debit              = e.get('susp_cp_debit', pd.DataFrame())
+    susp_cp_credit_courant     = e.get('susp_cp_credit_courant', pd.DataFrame())
+    susp_cp_credit_report_rej  = e.get('susp_cp_credit_report_rejete', pd.DataFrame())
+    susp_cp_credit_report_tra  = e.get('susp_cp_credit_report_transit', pd.DataFrame())
+    susp_rb_debit_transit      = e.get('susp_rb_debit_transit', pd.DataFrame())
+    susp_rb_debit_frais        = e.get('susp_rb_debit_frais', pd.DataFrame())
 
     rows_left = []
     for _, r in susp_cp_debit.iterrows():
         rows_left.append({'row': r, 'side': 'gl_debit', 'is_rep': _is_report(r.to_dict())})
-    for _, r in susp_rb_debit.iterrows():
+    for _, r in susp_rb_debit_transit.iterrows():
         rows_left.append({'row': r, 'side': 'rb_debit', 'is_rep': _is_report(r.to_dict())})
     for _, r in susp_cp_credit_courant.iterrows():
         rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': False})
-    # col I (DÉBIT journal)  : S_CP seulement (ligne solde)
-    # col J (CRÉDIT journal) : GL crédits reportés seulement (valeur négative)
-    # Les suspens RB CRÉDIT N'APPARAISSENT PAS dans le tableau ERB
-    rows_right_debit  = []  # vide — S_CP dans ligne solde uniquement
-    rows_right_credit = []
-    for _, r in susp_cp_credit_report.iterrows():
-        rows_right_credit.append({'row': r, 'side': 'gl_credit_report', 'is_rep': True})
-    max_right = max(len(rows_right_debit), len(rows_right_credit))
+    for _, r in susp_cp_credit_report_tra.iterrows():
+        rows_left.append({'row': r, 'side': 'gl_credit_courant', 'is_rep': True})
+
     rows_right = []
-    for i in range(max_right):
-        rows_right.append({
-            'debit_item':  rows_right_debit[i]  if i < len(rows_right_debit)  else None,
-            'credit_item': rows_right_credit[i] if i < len(rows_right_credit) else None,
-        })
+    for _, r in susp_cp_credit_report_rej.iterrows():
+        rows_right.append({'row': r, 'sign': -1, 'is_rep': True})
+    for _, r in susp_rb_debit_frais.iterrows():
+        rows_right.append({'row': r, 'sign': +1, 'is_rep': False})
+
 
     n_rows = max(len(rows_left), len(rows_right), 8)
     periode = info.get('pe','')
@@ -1722,19 +1703,44 @@ def export_xlsx(e, info):
                 ws.cell(row=row,column=col).font=Font(bold=is_rep2,size=10)
         else:
             for c in range(6,11): ws.cell(row=row,column=c).fill=OE; ws.cell(row=row,column=c).border=tb()
+
+        if i < len(rows_right):
+            item2   = rows_right[i]
+            r2      = item2['row']
+            sign2   = item2['sign']    # +1 frais, -1 rejeté
+            is_rep2 = item2['is_rep']
+            cp_fl   = RL if sign2 < 0 else OL
+            lb2     = r2['lib']
+            if is_rep2: lb2 = f'[↩ {r2.get("carry_from","")}] {lb2}'
+            cell(row,6,r2['date'],cp_fl,bold=is_rep2)
+            cell(row,7,lb2,cp_fl,bold=is_rep2)
+            cell(row,8,r2.get('piece',''),cp_fl,bold=is_rep2)
+            # Montant brut
+            m_brut = r2['credit'] if r2['credit'] > 0 else r2['debit']
+            val_col10 = -m_brut if sign2 < 0 else m_brut
+            ws.cell(row=row,column=9,value=None).fill=cp_fl
+            cl10 = ws.cell(row=row,column=10,value=val_col10)
+            cl10.fill=cp_fl
+            cl10.alignment=Alignment(horizontal='right')
+            cl10.font=Font(bold=is_rep2, color="7A0000" if sign2<0 else "3A1800", size=10)
+        else:
+            for c in range(6,11): ws.cell(row=row,column=c).fill=OE; ws.cell(row=row,column=c).border=tb()
         for c in range(1,11): ws.cell(row=row,column=c).border=tb()
         row+=1
 
     for c in range(1,11):
         cl=ws.cell(row=row,column=c); cl.fill=ST; cl.font=Font(bold=True,color="FFFFFF",size=10); cl.border=tb()
     ws.cell(row=row,column=1,value="TOTAUX"); ws.cell(row=row,column=6,value="TOTAUX")
-    for c,v in [(4,e['tot_d_rb']),(5,e['tot_c_rb']),(9,e['tot_d_cp']),(10,e['tot_c_cp'] if e['tot_c_cp'] else None)]:
+    col_j_net = e.get('col_j_net', 0.0)
+    for c,v in [(4,e['tot_d_rb']),(5,e['tot_c_rb']),(9,e['tot_d_cp']),(10,col_j_net if col_j_net else None)]:
         ws.cell(row=row,column=c,value=v).alignment=Alignment(horizontal='right')
     row+=1
     for c in range(1,11):
         cl=ws.cell(row=row,column=c); cl.fill=CY; cl.font=Font(bold=True,color="FFFFFF",size=10); cl.border=tb()
     ws.cell(row=row,column=2,value="SOLDES RAPPROCHES")
-    ws.cell(row=row,column=4,value=e['sr_rb']).alignment=Alignment(horizontal='right')
+    # SR_RB affiché négatif (convention DEBIT = valeur négative)
+    sr_rb_xlsx = -e['sr_rb'] if e['sr_rb'] >= 0 else abs(e['sr_rb'])
+    ws.cell(row=row,column=4,value=sr_rb_xlsx).alignment=Alignment(horizontal='right')
     ws.cell(row=row,column=7,value="SOLDES RAPPROCHES")
     ws.cell(row=row,column=10,value=e['sr_cp']).alignment=Alignment(horizontal='right')
     row+=1
@@ -2155,7 +2161,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.19")
+    st.caption("ERB v5.20")
 
 # ═══ ROUTING ══════════════════════════════════════════════════════════
 page=st.session_state.page
