@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ERB Manager — Rapprochement Bancaire  (Streamlit)
-#  v5.22 — Passe 1 corrigée : carry_RB ↔ RB_courant → les deux disparaissent
+#  v5.23 — Bouton "Intégrer TOUS les débits RB sans GL" automatique
 # ═══════════════════════════════════════════════════════════════════════
 import sys, asyncio
 import random, time
@@ -2222,7 +2222,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.22")
+    st.caption("ERB v5.23")
 
 # ═══ ROUTING ══════════════════════════════════════════════════════════
 page=st.session_state.page
@@ -2563,14 +2563,59 @@ elif page=="rapprochement":
 
         # ── AMÉLIORATION 2 : Saisie manuelle de lignes GL ───────────
         st.markdown("---")
+
+        # Tous les suspens RB débit courants (pas carries, pas rejetés)
+        susp_rb_d_tous = e.get('susp_rb_debit', pd.DataFrame())
+        susp_rb_d_courant = susp_rb_d_tous[
+            ~susp_rb_d_tous.apply(lambda r: _is_report(r.to_dict()), axis=1)
+        ] if not susp_rb_d_tous.empty else pd.DataFrame()
+        n_susp_rb_courant = len(susp_rb_d_courant)
+
         with st.expander("➕ Saisir des écritures GL manquantes (frais bancaires, régularisations…)", expanded=(n_frais > 0 and not e['ok'])):
             st.markdown(
                 "Ajoutez ici les écritures absentes du journal (frais bancaires, etc.). "
                 "Elles seront intégrées immédiatement au rapprochement."
             )
 
-            # Pré-remplir avec les frais détectés si l'utilisateur n'a pas encore saisi
-            if n_frais > 0 and not e['ok']:
+            # Bouton : intégrer TOUS les suspens RB débit courants comme GL
+            if n_susp_rb_courant > 0 and not e['ok']:
+                total_rb_courant = susp_rb_d_courant['debit'].sum()
+                st.markdown(
+                    f"💡 **{n_susp_rb_courant} débit(s) relevé sans GL détecté(s)** "
+                    f"(total : **{total_rb_courant:,.0f} FCFA**) — "
+                    f"cliquez sur **⚡ Intégrer tous dans le GL** pour les ajouter automatiquement."
+                )
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("⚡ Intégrer TOUS les débits RB sans GL", key="btn_prefill_all",
+                                 use_container_width=True, type="primary"):
+                        lignes_init = []
+                        for _,r in susp_rb_d_courant.iterrows():
+                            lignes_init.append({
+                                'date':   r.get('date',''),
+                                'lib':    r.get('lib',''),
+                                'piece':  r.get('piece',''),
+                                'debit':  0.0,
+                                'credit': float(r['debit']),  # RB débit → GL crédit
+                            })
+                        st.session_state['_gl_manual_rows'] = lignes_init
+                        st.rerun()
+                with col_btn2:
+                    if n_frais > 0:
+                        if st.button("⚡ Pré-remplir frais seulement", key="btn_prefill_frais",
+                                     use_container_width=True):
+                            lignes_init = []
+                            for _,r in frais_df.iterrows():
+                                lignes_init.append({
+                                    'date':   r.get('date',''),
+                                    'lib':    r.get('lib',''),
+                                    'piece':  r.get('piece',''),
+                                    'debit':  0.0,
+                                    'credit': float(r['debit']),
+                                })
+                            st.session_state['_gl_manual_rows'] = lignes_init
+                            st.rerun()
+            elif n_frais > 0 and not e['ok']:
                 st.markdown(
                     f"💡 **{n_frais} frais bancaire(s) détecté(s)** — cliquez sur "
                     f"**Pré-remplir depuis frais relevé** pour les charger automatiquement."
@@ -2583,7 +2628,7 @@ elif page=="rapprochement":
                             'lib':    r.get('lib',''),
                             'piece':  r.get('piece',''),
                             'debit':  0.0,
-                            'credit': float(r['debit']),  # inversé : RB débit → GL crédit
+                            'credit': float(r['debit']),
                         })
                     st.session_state['_gl_manual_rows'] = lignes_init
                     st.rerun()
