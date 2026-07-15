@@ -2633,45 +2633,8 @@ elif page=="rapprochement":
                 "Elles seront intégrées immédiatement au rapprochement."
             )
 
-            # Bouton : intégrer TOUS les suspens RB débit courants comme GL
-            if n_susp_rb_courant > 0 and not e['ok']:
-                total_rb_courant = susp_rb_d_courant['debit'].sum()
-                st.markdown(
-                    f"💡 **{n_susp_rb_courant} débit(s) relevé sans GL détecté(s)** "
-                    f"(total : **{total_rb_courant:,.0f} FCFA**) — "
-                    f"cliquez sur **⚡ Intégrer tous dans le GL** pour les ajouter automatiquement."
-                )
-                col_btn1, col_btn2 = st.columns(2)
-                with col_btn1:
-                    if st.button("⚡ Intégrer TOUS les débits RB sans GL", key="btn_prefill_all",
-                                 use_container_width=True, type="primary"):
-                        lignes_init = []
-                        for _,r in susp_rb_d_courant.iterrows():
-                            lignes_init.append({
-                                'date':   r.get('date',''),
-                                'lib':    r.get('lib',''),
-                                'piece':  r.get('piece',''),
-                                'debit':  0.0,
-                                'credit': float(r['debit']),  # RB débit → GL crédit
-                            })
-                        st.session_state['_gl_manual_rows'] = lignes_init
-                        st.rerun()
-                with col_btn2:
-                    if n_frais > 0:
-                        if st.button("⚡ Pré-remplir frais seulement", key="btn_prefill_frais",
-                                     use_container_width=True):
-                            lignes_init = []
-                            for _,r in frais_df.iterrows():
-                                lignes_init.append({
-                                    'date':   r.get('date',''),
-                                    'lib':    r.get('lib',''),
-                                    'piece':  r.get('piece',''),
-                                    'debit':  0.0,
-                                    'credit': float(r['debit']),
-                                })
-                            st.session_state['_gl_manual_rows'] = lignes_init
-                            st.rerun()
-            elif n_frais > 0 and not e['ok']:
+            # Rappel frais si présents
+            if n_frais > 0 and not e['ok']:
                 st.markdown(
                     f"💡 **{n_frais} frais bancaire(s) détecté(s)** — cliquez sur "
                     f"**Pré-remplir depuis frais relevé** pour les charger automatiquement."
