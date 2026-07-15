@@ -2573,37 +2573,33 @@ elif page=="rapprochement":
 
         # Bouton hors expander : visible immédiatement si débits RB sans GL
         if n_susp_rb_courant > 0 and not e['ok']:
-            total_rb_courant = susp_rb_d_courant['debit'].sum()
-            st.info(
-                f"⚡ **{n_susp_rb_courant} débit(s) relevé sans contrepartie GL détecté(s)** "
-                f"— total **{total_rb_courant:,.0f} FCFA**\n\n"
-                f"L'outil peut les pointer automatiquement côté Journal (crédit) :"
-            )
-            col_btn1, col_btn2 = st.columns([2,1])
-            with col_btn1:
-                if st.button(
-                    f"⚡ Intégrer TOUS ({n_susp_rb_courant}) débits RB → GL crédit",
-                    key="btn_prefill_all_top", type="primary", use_container_width=True
-                ):
-                    lignes_init = []
-                    for _, r in susp_rb_d_courant.iterrows():
-                        lignes_init.append({
-                            'date':   r.get('date',''),
-                            'lib':    r.get('lib',''),
-                            'piece':  r.get('piece',''),
-                            'debit':  0.0,
-                            'credit': float(r['debit']),
-                        })
-                    st.session_state['_gl_manual_rows'] = lignes_init
-                    st.rerun()
-            with col_btn2:
-                if n_frais > 0:
+            # Filtrer : exclure les compensations de chèques (déjà un GL proche)
+            # Ne garder que frais, droits, taxes — pas les REGLEMENT COMPENSATION
+            _EXCL_TRANSIT = ['reglement compensation','compensation cheque',
+                             'remise cheque','versement','retrait par cheque',
+                             'ret chq','retrait chq']
+            susp_rb_integrables = susp_rb_d_courant[
+                ~susp_rb_d_courant['lib'].apply(
+                    lambda l: any(k in str(l).lower() for k in _EXCL_TRANSIT)
+                )
+            ].copy()
+            n_integrables = len(susp_rb_integrables)
+            total_integrables = susp_rb_integrables['debit'].sum() if n_integrables > 0 else 0
+
+            if n_integrables > 0:
+                st.info(
+                    f"⚡ **{n_integrables} écriture(s) GL manquante(s) détectée(s)** "
+                    f"(frais, droits, taxes) — total **{total_integrables:,.0f} FCFA**\n\n"
+                    f"L'outil peut les pointer automatiquement côté Journal (crédit) :"
+                )
+                col_btn1, col_btn2 = st.columns([2,1])
+                with col_btn1:
                     if st.button(
-                        f"⚡ Frais seulement ({n_frais})",
-                        key="btn_prefill_frais_top", use_container_width=True
+                        f"⚡ Intégrer {n_integrables} écriture(s) → GL crédit",
+                        key="btn_prefill_all_top", type="primary", use_container_width=True
                     ):
                         lignes_init = []
-                        for _, r in frais_df.iterrows():
+                        for _, r in susp_rb_integrables.iterrows():
                             lignes_init.append({
                                 'date':   r.get('date',''),
                                 'lib':    r.get('lib',''),
@@ -2613,6 +2609,23 @@ elif page=="rapprochement":
                             })
                         st.session_state['_gl_manual_rows'] = lignes_init
                         st.rerun()
+                with col_btn2:
+                    if n_frais > 0:
+                        if st.button(
+                            f"⚡ Frais seulement ({n_frais})",
+                            key="btn_prefill_frais_top", use_container_width=True
+                        ):
+                            lignes_init = []
+                            for _, r in frais_df.iterrows():
+                                lignes_init.append({
+                                    'date':   r.get('date',''),
+                                    'lib':    r.get('lib',''),
+                                    'piece':  r.get('piece',''),
+                                    'debit':  0.0,
+                                    'credit': float(r['debit']),
+                                })
+                            st.session_state['_gl_manual_rows'] = lignes_init
+                            st.rerun()
 
         with st.expander("➕ Saisir des écritures GL manquantes (frais bancaires, régularisations…)", expanded=(n_susp_rb_courant > 0 and not e['ok'])):
             st.markdown(
