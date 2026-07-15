@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ERB Manager — Rapprochement Bancaire  (Streamlit)
-#  v5.21 — Annulations GL → col E crédit relevé (convention CBAO ELECNOR)
+#  v5.22 — Passe 1 corrigée : carry_RB ↔ RB_courant → les deux disparaissent
 # ═══════════════════════════════════════════════════════════════════════
 import sys, asyncio
 import random, time
@@ -100,8 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = ""
-SUPABASE_KEY = ""
+SUPABASE_URL = "https://VOTRE_PROJET.supabase.co"
+SUPABASE_KEY = "VOTRE_CLE_ANON_PUBLIQUE"
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -1127,6 +1127,9 @@ def auto_match(rb_df, cp_df, inversion=True):
     )
 
     # ── PASSE 1 : carryover_rb ↔ rb_courant (même sens, même montant) ──
+    # Quand un carry RB (chèque reporté) passe au relevé ce mois,
+    # le carry ET le RB courant sont tous deux régularisés → disparaissent du tableau.
+    # Le carry était déjà dans S_CP (saisi avant). Le RB courant est sa contrepartie relevé.
     rb_carry_out = rb_carry.copy()
     p1_cnt = 0; rb_reserved = set()
 
@@ -1138,11 +1141,22 @@ def auto_match(rb_df, cp_df, inversion=True):
             carry_d = rb_carry_out.at[ci,'debit']
             carry_c = rb_carry_out.at[ci,'credit']
             if carry_d == 0 and carry_c == 0: continue
+            carry_lib = str(rb_carry_out.at[ci,'lib']).lower()
             for ri in rb_courant.index:
                 if ri in rb_reserved: continue
                 cur_d = rb_courant.at[ri,'debit']
                 cur_c = rb_courant.at[ri,'credit']
-                if (carry_d > 0 and abs(carry_d - cur_d) <= 1) or                    (carry_c > 0 and abs(carry_c - cur_c) <= 1):
+                if (carry_d > 0 and abs(carry_d - cur_d) <= 1) or \
+                   (carry_c > 0 and abs(carry_c - cur_c) <= 1):
+                    # Vérification optionnelle : même référence numérique si dispo
+                    import re as _re
+                    # Normaliser : enlever zéros initiaux pour comparer 0000124 = 124
+                    nums_carry = set(str(int(n)) for n in _re.findall(r'\d{3,}', carry_lib) if int(n)>0)
+                    cur_lib    = str(rb_courant.at[ri,'lib']).lower()
+                    nums_cur   = set(str(int(n)) for n in _re.findall(r'\d{3,}', cur_lib) if int(n)>0)
+                    # Si les deux ont des refs numériques et qu'elles n'ont aucun commun → pas le même chèque
+                    if nums_carry and nums_cur and not (nums_carry & nums_cur):
+                        continue
                     mc1 += 1; mid = f"C{mc1}"
                     rb_carry_out.at[ci,'matched']  = True
                     rb_carry_out.at[ci,'match_id'] = mid
@@ -1205,13 +1219,19 @@ def auto_match(rb_df, cp_df, inversion=True):
     # ── Fusionner ─────────────────────────────────────────────────────
     # rb_p2            : lignes courantes libres (matchées GL ou non → suspens ou rapprochées)
     # rb_pris          : lignes courant consommées par Passe 1 → EXCLUES COMPLÈTEMENT
-    #                    (elles sont régularisées avec un carry, elles n'ont rien à faire
-    #                     dans rb_df ni dans le tableau ERB)
-    # rb_carry_non_reg : carries non régularisés → suspens rouges dans le tableau ERB
+    #                    (carry ↔ rb_courant : le chèque est régularisé, les deux disparaissent)
+    # rb_carry_non_reg : carries non régularisés par passe 1 NI par passe 1b → suspens rouges
+    #                    SAUF si le carry a été régularisé par passe 1 (carry↔rb_courant) :
+    #                    dans ce cas le carry disparaît aussi complètement.
+    # Carries régularisés par passe 1 (carry↔rb_courant) → exclus du tableau
+    rb_carry_reg_p1 = rb_carry_out[rb_carry_out['matched'].fillna(False).astype(bool) &
+                                   rb_carry_out['match_id'].fillna('').str.startswith('C')].copy()
+    # Carries non régularisés (ni passe 1, ni passe 1b) → suspens rouges col D
     rb_carry_non_reg = rb_carry_out[~rb_carry_out['matched'].fillna(False).astype(bool)].copy()
-    parts = [rb_p2]   # rb_pris intentionnellement exclu
+    parts = [rb_p2]   # rb_pris (passe 1 côté rb_courant) intentionnellement exclu
     if len(rb_carry_non_reg) > 0:
         parts.append(rb_carry_non_reg)
+    # rb_carry_reg_p1 intentionnellement exclu (carry régularisé par rb_courant)
     rb_out = pd.concat(parts, ignore_index=True)
     # cp_out = résultat passe 2 (déjà filtré des carries régularisés en passe 0)
     cp_out = cp_p2
@@ -2202,7 +2222,7 @@ with st.sidebar:
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
-    st.caption("ERB v5.21")
+    st.caption("ERB v5.22")
 
 # ═══ ROUTING ══════════════════════════════════════════════════════════
 page=st.session_state.page
