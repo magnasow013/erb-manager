@@ -100,8 +100,8 @@ def _extract_pdf_tables(uploaded_file):
 # 3. Remplacez ci-dessous OU ajoutez dans Streamlit Secrets :
 #    SUPABASE_URL = "https://xxxx.supabase.co"
 #    SUPABASE_KEY = "eyJ..."
-SUPABASE_URL = "https://VOTRE_PROJET.supabase.co"
-SUPABASE_KEY = "VOTRE_CLE_ANON_PUBLIQUE"
+SUPABASE_URL = ""
+SUPABASE_KEY = ""
 
 def get_supabase():
     """Retourne un client Supabase configuré (depuis secrets ou constantes)."""
@@ -2345,8 +2345,14 @@ elif page=="rapprochement":
             st.session_state.regularisees=[]; st.rerun()
 
     # ── Informations — persistance via on_change ──────────────────────
-    def _save_srb(): st.session_state['s_rb'] = float(st.session_state['_inp_s_rb'])
-    def _save_scp(): st.session_state['s_cp'] = float(st.session_state['_inp_s_cp'])
+    def _save_srb():
+        if '_inp_s_rb' in st.session_state:
+            try: st.session_state['s_rb'] = float(st.session_state['_inp_s_rb'])
+            except (ValueError, TypeError): pass
+    def _save_scp():
+        if '_inp_s_cp' in st.session_state:
+            try: st.session_state['s_cp'] = float(st.session_state['_inp_s_cp'])
+            except (ValueError, TypeError): pass
 
     rb_auto=st.session_state.rb_solde_auto; cp_auto=st.session_state.cp_solde_auto
     if rb_auto and float(st.session_state.get('s_rb',0.0))==0.0:
